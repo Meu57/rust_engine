@@ -1,0 +1,14 @@
+[package]
+name = "engine_shared"
+version = "0.1.0"
+edition = "2024"
+
+
+
+
+[dependencies]
+# glam is the standard for game math (Vec2, Vec3, Mat4).
+# "bytemuck" allows us to cast structs to bytes for the GPU (needed later).
+glam = { version = "0.25", features = ["bytemuck"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+

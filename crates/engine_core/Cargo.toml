@@ -1,0 +1,28 @@
+[package]
+name = "engine_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Engine internal dependency
+engine_ecs = { path = "../engine_ecs" }
+
+engine_shared = { path = "../engine_shared" }
+glam = "0.25"
+
+# Windowing (EventLoop 2.0)
+winit = "0.29"
+
+# Logging & diagnostics
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Graphics API
+wgpu = "0.19"
+
+# Minimal async runtime to block poll futures (e.g., wgpu init)
+pollster = "0.3"
+
+bytemuck = { version = "1.14", features = ["derive"] }
+
+libloading = "0.8" # Standard crate for dynamic library loading

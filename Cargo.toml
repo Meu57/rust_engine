@@ -1,0 +1,18 @@
+# rust_engine/Cargo.toml
+[workspace]
+resolver = "2"
+members = ["crates/engine_core","crates/engine_ecs","crates/game_plugin","crates/editor"]
+
+# Optimization Profiles
+# We need these to ensure the engine is performant even when we are debugging gameplay logic.
+[profile.dev]
+opt-level = 1 # Slight optimization for our code
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 3 # Maximize optimization for dependencies (WGPU/Rapier need this to run fast)
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+

@@ -1,0 +1,12 @@
+[package]
+name = "game_plugin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+engine_shared = { path = "../engine_shared" }
+engine_ecs = { path = "../engine_ecs" } # <--- Needed to access World
+glam = "0.25"

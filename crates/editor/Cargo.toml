@@ -1,0 +1,8 @@
+[package]
+name = "editor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# We depend on our local engine_core
+engine_core = { path = "../engine_core" }
