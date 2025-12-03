@@ -1,7 +1,59 @@
 // crates/engine_shared/src/lib.rs
+#![allow(dead_code)]
 
 use glam::{Vec2, Vec4};
-use std::collections::HashSet;
+use core::ffi::c_char;
+
+/// Stable Integer ID for Actions (FFI-safe)
+pub type ActionId = u32;
+pub const ACTION_NOT_FOUND: ActionId = u32::MAX;
+
+/// Maximum number of analog axes we expose across FFI
+pub const MAX_AXES: usize = 8;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct InputState {
+    /// Bitmask for up to 64 digital actions.
+    /// If bit N set -> ActionId(N) is active.
+    pub digital_mask: u64,
+
+    /// Fixed-size analog axes. Host maps an ActionId -> axis index.
+    pub analog_axes: [f32; MAX_AXES],
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            digital_mask: 0,
+            analog_axes: [0.0; MAX_AXES],
+        }
+    }
+}
+
+impl InputState {
+    /// Safe check; returns false for out-of-range ids (including ACTION_NOT_FOUND).
+    pub fn is_active(&self, action_id: ActionId) -> bool {
+        if (action_id as usize) >= 64 { return false; }
+        (self.digital_mask & (1u64 << action_id)) != 0
+    }
+
+    pub fn get_axis(&self, axis_index: usize) -> f32 {
+        if axis_index >= MAX_AXES { 0.0 } else { self.analog_axes[axis_index] }
+    }
+}
+
+/// Host -> Plugin vtable: extern "C" callable helpers passed during handshake.
+#[repr(C)]
+pub struct HostInterface {
+    /// name_ptr + name_len -> ActionId (ACTION_NOT_FOUND if missing)
+    pub get_action_id: extern "C" fn(name_ptr: *const u8, name_len: usize) -> ActionId,
+
+    /// OPTIONAL: diagnostic helper; can be null if host doesn't support it.
+    pub log: Option<extern "C" fn(msg: *const c_char)>,
+}
+
+/* ECS components (FFI-safe PODs) */
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -13,11 +65,7 @@ pub struct CTransform {
 
 impl Default for CTransform {
     fn default() -> Self {
-        Self {
-            pos: Vec2::ZERO,
-            scale: Vec2::ONE,
-            rotation: 0.0,
-        }
+        Self { pos: Vec2::ZERO, scale: Vec2::ONE, rotation: 0.0 }
     }
 }
 
@@ -28,46 +76,26 @@ pub struct CSprite {
 }
 
 impl Default for CSprite {
-    fn default() -> Self {
-        Self {
-            color: Vec4::new(1.0, 1.0, 1.0, 1.0),
-        }
-    }
+    fn default() -> Self { Self { color: Vec4::ONE } }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CPlayer;
 
-// Enemy tag/logic component
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CEnemy {
     pub speed: f32,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Default)]
-pub struct Input {
-    pub keys_pressed: HashSet<u32>,
-    pub keys_just_pressed: HashSet<u32>,
-}
-
-impl Input {
-    pub fn is_key_pressed(&self, key: u32) -> bool {
-        self.keys_pressed.contains(&key)
-    }
-    pub fn is_key_just_pressed(&self, key: u32) -> bool {
-        self.keys_just_pressed.contains(&key)
-    }
-}
-
+/* GameLogic trait — NOTE: not FFI; plugin exports factory that returns a boxed trait object */
 pub trait GameLogic {
-    fn on_load(&mut self, _world: &mut dyn std::any::Any) {
-        println!("Game Plugin Loaded!");
-    }
-    fn update(&mut self, world: &mut dyn std::any::Any, input: &Input, dt: f32);
-    fn on_unload(&mut self, _world: &mut dyn std::any::Any) {
-        println!("Game Plugin Unloaded!");
-    }
+    /// Called once after plugin loaded. HostInterface supplied for negotiation.
+    fn on_load(&mut self, world: &mut dyn std::any::Any, host: &HostInterface) { }
+
+    /// Main update; receives FFI-safe InputState
+    fn update(&mut self, world: &mut dyn std::any::Any, input: &InputState, dt: f32);
+
+    fn on_unload(&mut self, world: &mut dyn std::any::Any) { }
 }
