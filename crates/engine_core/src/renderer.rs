@@ -156,7 +156,7 @@ impl Renderer {
         }
     }
 
-    // Updated render method that accepts GUI primitives
+    // Updated render method to Fix Render Order: Game First -> UI Second
     pub fn render(
         &mut self, 
         world: &World, 
@@ -189,7 +189,7 @@ impl Renderer {
             label: Some("Render Encoder"),
         });
 
-        // 2. DRAW GAME
+        // 2. DRAW GAME (Submit Game Pass First)
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -211,6 +211,10 @@ impl Renderer {
             render_pass.draw(0..4, 0..instances.len() as u32);
         }
 
+        // [FIX] Submit the Game Encoder to the GPU *before* starting the GUI encoder.
+        // This ensures the game is drawn and the screen is cleared appropriately before we draw the UI on top.
+        self.queue.submit(std::iter::once(encoder.finish()));
+
         // 3. DRAW GUI (Overlay)
         if let Some((ctx, primitives, delta)) = gui_ctx {
             // Update textures
@@ -220,7 +224,8 @@ impl Renderer {
 
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
-                pixels_per_point: ctx.pixels_per_point(), // Should be window scale factor
+                // [FIX] Use the dynamic pixels_per_point from the context
+                pixels_per_point: ctx.pixels_per_point(), 
             };
 
             // Prepare buffers
@@ -235,7 +240,8 @@ impl Renderer {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load, // Draw ON TOP of existing scene
+                            // [FIX] LoadOp::Load ensures we draw ON TOP of the existing game scene
+                            load: wgpu::LoadOp::Load, 
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -251,10 +257,10 @@ impl Renderer {
                 self.gui_renderer.free_texture(id);
             }
             
+            // Submit the GUI commands to the GPU *after* the game
             self.queue.submit(std::iter::once(command_encoder.finish()));
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())

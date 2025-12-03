@@ -6,23 +6,22 @@ use std::sync::{Mutex, OnceLock};
 
 use glam::Vec2;
 use winit::{
-    event::{Event, WindowEvent, ElementState},
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
     keyboard::{KeyCode, PhysicalKey},
+    window::WindowBuilder,
 };
 
 mod hot_reload;
-mod renderer; 
+mod renderer;
 use renderer::Renderer;
 
 use engine_shared::{
-    ActionId, ACTION_NOT_FOUND, HostInterface, InputState, MAX_AXES,
-    CTransform, CSprite, CPlayer, CEnemy,
-    PriorityLayer, MovementSignal, ActionSignal,
+    ActionId, ActionSignal, CEnemy, CPlayer, CSprite, CTransform, HostInterface, InputState,
+    MovementSignal, PriorityLayer, ACTION_NOT_FOUND, MAX_AXES,
 };
 
-use engine_ecs::World; 
+use engine_ecs::World;
 
 // --- 1. ACTION REGISTRY (Unchanged) ---
 #[derive(Default, Clone)]
@@ -33,7 +32,9 @@ struct ActionRegistry {
 
 impl ActionRegistry {
     fn register(&mut self, name: &str) -> ActionId {
-        if let Some(&id) = self.name_to_id.get(name) { return id; }
+        if let Some(&id) = self.name_to_id.get(name) {
+            return id;
+        }
         let id = self.next_id;
         self.name_to_id.insert(name.to_string(), id);
         self.next_id = self.next_id.wrapping_add(1);
@@ -86,7 +87,11 @@ impl Arbiter {
 
         // A. Resolve Movement
         let mut winning_move_layer = PriorityLayer::Ambient;
-        for &layer in &[PriorityLayer::Reflex, PriorityLayer::Cutscene, PriorityLayer::Control] {
+        for &layer in &[
+            PriorityLayer::Reflex,
+            PriorityLayer::Cutscene,
+            PriorityLayer::Control,
+        ] {
             let has_signal = self.move_signals.iter().any(|s| s.layer == layer);
             if has_signal {
                 winning_move_layer = layer;
@@ -104,24 +109,28 @@ impl Arbiter {
         if final_vector.length_squared() > 1.0 {
             final_vector = final_vector.normalize();
         }
-        
+
         state.analog_axes[0] = final_vector.x;
         state.analog_axes[1] = final_vector.y;
 
         // B. Resolve Actions (Digital)
         let mut winning_action_layer = PriorityLayer::Ambient;
-         for &layer in &[PriorityLayer::Reflex, PriorityLayer::Cutscene, PriorityLayer::Control] {
+        for &layer in &[
+            PriorityLayer::Reflex,
+            PriorityLayer::Cutscene,
+            PriorityLayer::Control,
+        ] {
             let has_signal = self.action_signals.iter().any(|s| s.layer == layer);
             if has_signal {
                 winning_action_layer = layer;
-                break; 
+                break;
             }
         }
 
         for s in &self.action_signals {
             if s.layer == winning_action_layer && s.active {
                 if (s.action_id as usize) < 64 {
-                     state.digital_mask |= 1u64 << s.action_id;
+                    state.digital_mask |= 1u64 << s.action_id;
                 }
             }
         }
@@ -135,7 +144,9 @@ static GLOBAL_REGISTRY: OnceLock<Mutex<ActionRegistry>> = OnceLock::new();
 
 extern "C" fn host_get_action_id(name_ptr: *const u8, name_len: usize) -> ActionId {
     unsafe {
-        if name_ptr.is_null() || name_len == 0 { return ACTION_NOT_FOUND; }
+        if name_ptr.is_null() || name_len == 0 {
+            return ACTION_NOT_FOUND;
+        }
         let slice = std::slice::from_raw_parts(name_ptr, name_len);
         if let Ok(name) = std::str::from_utf8(slice) {
             if let Some(mutex) = GLOBAL_REGISTRY.get() {
@@ -157,6 +168,7 @@ pub struct App {
     // GUI State
     egui_ctx: egui::Context,
     egui_winit: Option<egui_winit::State>,
+    show_inspector: bool,
 }
 
 impl App {
@@ -176,18 +188,19 @@ impl App {
 
         let _ = GLOBAL_REGISTRY.set(Mutex::new(registry.clone()));
 
-        Self { 
-            registry, 
-            input_map, 
+        Self {
+            registry,
+            input_map,
             arbiter: Arbiter::default(),
             window_title: "Rust Engine: Input Inspector".to_string(),
             egui_ctx: egui::Context::default(),
             egui_winit: None,
+            show_inspector: true,
         }
     }
 
     pub fn run(mut self) {
-        let event_loop = EventLoop::new().unwrap(); 
+        let event_loop = EventLoop::new().unwrap();
         let window = WindowBuilder::new()
             .with_title(&self.window_title)
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
@@ -212,14 +225,19 @@ impl App {
         world.register_component::<CSprite>();
 
         let player = world.spawn();
-        world.add_component(player, CTransform { pos: Vec2::new(100.0,100.0), ..Default::default() });
+        world.add_component(
+            player,
+            CTransform {
+                pos: Vec2::new(100.0, 100.0),
+                ..Default::default()
+            },
+        );
         world.add_component(player, CPlayer);
         world.add_component(player, CSprite::default());
 
         let plugin_path = "target/debug/game_plugin.dll";
-        let mut game_plugin = unsafe {
-            hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin")
-        };
+        let mut game_plugin =
+            unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
 
         let host_interface = HostInterface {
             get_action_id: host_get_action_id,
@@ -230,167 +248,264 @@ impl App {
 
         let mut active_keys: Vec<KeyCode> = Vec::new();
 
-        event_loop.run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::Poll); 
+        event_loop
+            .run(move |event, elwt| {
+                elwt.set_control_flow(ControlFlow::Poll);
 
-            // Pass event to GUI first
-            if let Some(gui) = &mut self.egui_winit {
-                if let Event::WindowEvent { event: ref w_event, .. } = event {
-                    let _ = gui.on_window_event(&window, w_event);
+                // Pass event to GUI first
+                if let Some(gui) = &mut self.egui_winit {
+                    if let Event::WindowEvent {
+                        event: ref w_event, ..
+                    } = event
+                    {
+                        let _ = gui.on_window_event(&window, w_event);
+                    }
                 }
-            }
 
-            match event {
-                Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
-                    
-                    WindowEvent::KeyboardInput { event: key_event, .. } => {
-                        // Prevent game from reading input if GUI wants it (simple check)
-                        if self.egui_ctx.wants_keyboard_input() { return; }
+                match event {
+                    Event::WindowEvent { event, .. } => match event {
+                        WindowEvent::CloseRequested => elwt.exit(),
 
-                        if let PhysicalKey::Code(keycode) = key_event.physical_key {
+                        WindowEvent::KeyboardInput {
+                            event: key_event, ..
+                        } => {
                             if key_event.state == ElementState::Pressed {
-                                if !active_keys.contains(&keycode) { active_keys.push(keycode); }
-                            } else {
-                                active_keys.retain(|&k| k != keycode);
+                                if let PhysicalKey::Code(KeyCode::F1) = key_event.physical_key {
+                                    self.show_inspector = !self.show_inspector;
+                                    println!("Inspector visibility: {}", self.show_inspector);
+                                }
+                            }
+
+                            // Prevent game from reading input if GUI wants it (simple check)
+                            if self.egui_ctx.wants_keyboard_input() {
+                                return;
+                            }
+
+                            if let PhysicalKey::Code(keycode) = key_event.physical_key {
+                                if key_event.state == ElementState::Pressed {
+                                    if !active_keys.contains(&keycode) {
+                                        active_keys.push(keycode);
+                                    }
+                                } else {
+                                    active_keys.retain(|&k| k != keycode);
+                                }
                             }
                         }
-                    }
-                    
-                    WindowEvent::Resized(size) => renderer.resize(size),
-                    WindowEvent::RedrawRequested => { 
-                        // --- GUI FRAME START ---
-                        let raw_input = self.egui_winit.as_mut().unwrap().take_egui_input(&window);
-                        self.egui_ctx.begin_frame(raw_input);
 
-                        // --- DRAW INSPECTOR ---
-                        egui::Window::new("Input Inspector")
-                            .default_pos([10.0, 10.0])
-                            .show(&self.egui_ctx, |ui| {
-                                ui.heading("Arbitration Stack");
-                                ui.separator();
+                        WindowEvent::Resized(size) => renderer.resize(size),
+                        WindowEvent::RedrawRequested => {
+                            // --- GUI FRAME START ---
+                            let raw_input =
+                                self.egui_winit.as_mut().unwrap().take_egui_input(&window);
+                            self.egui_ctx.begin_frame(raw_input);
 
-                                // Visualize Layers
-                                let layers = [
-                                    (PriorityLayer::Reflex, "Layer 0: Reflex (Physics)", egui::Color32::RED),
-                                    (PriorityLayer::Cutscene, "Layer 1: Cutscene", egui::Color32::YELLOW),
-                                    (PriorityLayer::Control, "Layer 2: Player Control", egui::Color32::GREEN),
-                                    (PriorityLayer::Ambient, "Layer 3: Ambient", egui::Color32::GRAY),
-                                ];
+                            // --- DRAW INSPECTOR ---
+                            //
 
-                                // Find winners
-                                let mut winning_move = PriorityLayer::Ambient;
-                                for &(layer, _, _) in &layers {
-                                    if self.arbiter.move_signals.iter().any(|s| s.layer == layer) {
-                                        winning_move = layer;
-                                        break; 
-                                    }
-                                }
+                            // Only draw the inspector if the toggle is active
+                            if self.show_inspector {
+                                egui::Window::new("Input Inspector")
+                                    .default_pos([10.0, 10.0])
+                                    .show(&self.egui_ctx, |ui| {
+                                        ui.heading("Arbitration Stack");
+                                        ui.separator();
 
-                                for (layer, label, color) in layers {
-                                    let is_active = self.arbiter.move_signals.iter().any(|s| s.layer == layer);
-                                    let is_winner = layer == winning_move && is_active;
+                                        // Visualize Layers
+                                        let layers = [
+                                            (
+                                                PriorityLayer::Reflex,
+                                                "Layer 0: Reflex (Physics)",
+                                                egui::Color32::RED,
+                                            ),
+                                            (
+                                                PriorityLayer::Cutscene,
+                                                "Layer 1: Cutscene",
+                                                egui::Color32::YELLOW,
+                                            ),
+                                            (
+                                                PriorityLayer::Control,
+                                                "Layer 2: Player Control",
+                                                egui::Color32::GREEN,
+                                            ),
+                                            (
+                                                PriorityLayer::Ambient,
+                                                "Layer 3: Ambient",
+                                                egui::Color32::GRAY,
+                                            ),
+                                        ];
 
-                                    if is_winner {
-                                        ui.colored_label(color, format!("▶ {} [WINNER]", label));
-                                        // Show signals
-                                        for s in self.arbiter.move_signals.iter().filter(|s| s.layer == layer) {
-                                            ui.label(format!("   Vector: {:.2}, Weight: {:.2}", s.vector, s.weight));
+                                        // Find winners
+                                        let mut winning_move = PriorityLayer::Ambient;
+                                        for &(layer, _, _) in &layers {
+                                            if self
+                                                .arbiter
+                                                .move_signals
+                                                .iter()
+                                                .any(|s| s.layer == layer)
+                                            {
+                                                winning_move = layer;
+                                                break;
+                                            }
                                         }
-                                    } else if is_active {
-                                        ui.colored_label(color.linear_multiply(0.5), format!("▷ {} [SUPPRESSED]", label));
-                                    } else {
-                                        ui.label(format!("  {}", label));
-                                    }
+
+                                        for (layer, label, color) in layers {
+                                            let is_active = self
+                                                .arbiter
+                                                .move_signals
+                                                .iter()
+                                                .any(|s| s.layer == layer);
+                                            let is_winner = layer == winning_move && is_active;
+
+                                            if is_winner {
+                                                ui.colored_label(
+                                                    color,
+                                                    format!("▶ {} [WINNER]", label),
+                                                );
+                                                // Show signals
+                                                for s in self
+                                                    .arbiter
+                                                    .move_signals
+                                                    .iter()
+                                                    .filter(|s| s.layer == layer)
+                                                {
+                                                    ui.label(format!(
+                                                        "   Vector: {:.2}, Weight: {:.2}",
+                                                        s.vector, s.weight
+                                                    ));
+                                                }
+                                            } else if is_active {
+                                                ui.colored_label(
+                                                    color.linear_multiply(0.5),
+                                                    format!("▷ {} [SUPPRESSED]", label),
+                                                );
+                                            } else {
+                                                ui.label(format!("  {}", label));
+                                            }
+                                        }
+
+                                        ui.separator();
+                                        ui.label("Press 'P' to simulate Reflex Layer override.");
+                                        // [NEW] Visual feedback for the toggle
+                                        ui.colored_label(
+                                            egui::Color32::LIGHT_GRAY,
+                                            "Press 'F1' to hide this window.",
+                                        );
+                                    });
+                            }
+
+                            // --- GUI FRAME END ---
+                            let gui_output = self.egui_ctx.end_frame();
+                            let primitives = self
+                                .egui_ctx
+                                .tessellate(gui_output.shapes, gui_output.pixels_per_point);
+                            let textures_delta = gui_output.textures_delta;
+
+                            self.egui_winit
+                                .as_mut()
+                                .unwrap()
+                                .handle_platform_output(&window, gui_output.platform_output);
+
+                            let _ = renderer.render(
+                                &world,
+                                Some((&self.egui_ctx, &primitives, &textures_delta)),
+                            );
+                        }
+                        _ => (),
+                    },
+                    Event::AboutToWait => {
+                        let dt = 1.0 / 60.0;
+
+                        // --- ARBITRATION LOGIC (Same as Phase 2) ---
+                        self.arbiter.clear();
+
+                        // Layer 2: Player
+                        let mut player_move = Vec2::ZERO;
+                        let mut player_active = false;
+                        for &key in &active_keys {
+                            if let Some(action_id) = self.input_map.map_signal_to_intent(key) {
+                                self.arbiter.add_action(ActionSignal {
+                                    layer: PriorityLayer::Control,
+                                    action_id,
+                                    active: true,
+                                });
+                                // Basic mapping for demo
+                                let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
+                                let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
+                                let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
+                                let id_right =
+                                    self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
+
+                                if action_id == id_up {
+                                    player_move.y += 1.0;
+                                    player_active = true;
                                 }
-                                
-                                ui.separator();
-                                ui.label("Press 'P' to simulate Reflex Layer override.");
+                                if action_id == id_down {
+                                    player_move.y -= 1.0;
+                                    player_active = true;
+                                }
+                                if action_id == id_left {
+                                    player_move.x -= 1.0;
+                                    player_active = true;
+                                }
+                                if action_id == id_right {
+                                    player_move.x += 1.0;
+                                    player_active = true;
+                                }
+                            }
+                        }
+                        if player_active {
+                            self.arbiter.add_movement(MovementSignal {
+                                layer: PriorityLayer::Control,
+                                vector: player_move,
+                                weight: 1.0,
                             });
+                        }
 
-                        // --- GUI FRAME END ---
-                        let gui_output = self.egui_ctx.end_frame();
-                        let primitives = self.egui_ctx.tessellate(gui_output.shapes, gui_output.pixels_per_point);
-                        let textures_delta = gui_output.textures_delta;
+                        // Layer 0: Reflex (Stun)
+                        if active_keys.contains(&KeyCode::KeyP) {
+                            self.arbiter.add_movement(MovementSignal {
+                                layer: PriorityLayer::Reflex,
+                                vector: Vec2::ZERO,
+                                weight: 1.0,
+                            });
+                            // Also add an action blocker
+                            self.arbiter.add_action(ActionSignal {
+                                layer: PriorityLayer::Reflex,
+                                action_id: 0,
+                                active: false,
+                            });
+                        }
 
-                        self.egui_winit.as_mut().unwrap().handle_platform_output(&window, gui_output.platform_output);
+                        let final_input_state = self.arbiter.resolve();
 
-                        let _ = renderer.render(&world, Some((&self.egui_ctx, &primitives, &textures_delta))); 
+                        // Compatibility Map (Vector -> Bits)
+                        let mut compat_state = final_input_state;
+                        let vx = compat_state.analog_axes[0];
+                        let vy = compat_state.analog_axes[1];
+                        let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
+                        let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
+                        let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
+                        let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
+
+                        if vy > 0.1 {
+                            compat_state.digital_mask |= 1 << id_up;
+                        }
+                        if vy < -0.1 {
+                            compat_state.digital_mask |= 1 << id_down;
+                        }
+                        if vx < -0.1 {
+                            compat_state.digital_mask |= 1 << id_left;
+                        }
+                        if vx > 0.1 {
+                            compat_state.digital_mask |= 1 << id_right;
+                        }
+
+                        game_plugin.api.update(&mut world, &compat_state, dt);
+                        window.request_redraw();
                     }
                     _ => (),
-                },
-                Event::AboutToWait => {
-                    let dt = 1.0 / 60.0;
-
-                    // --- ARBITRATION LOGIC (Same as Phase 2) ---
-                    self.arbiter.clear();
-
-                    // Layer 2: Player
-                    let mut player_move = Vec2::ZERO;
-                    let mut player_active = false;
-                    for &key in &active_keys {
-                        if let Some(action_id) = self.input_map.map_signal_to_intent(key) {
-                            self.arbiter.add_action(ActionSignal {
-                                layer: PriorityLayer::Control,
-                                action_id,
-                                active: true,
-                            });
-                            // Basic mapping for demo
-                            let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
-                            let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
-                            let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
-                            let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
-
-                            if action_id == id_up { player_move.y += 1.0; player_active = true; }
-                            if action_id == id_down { player_move.y -= 1.0; player_active = true; }
-                            if action_id == id_left { player_move.x -= 1.0; player_active = true; }
-                            if action_id == id_right { player_move.x += 1.0; player_active = true; }
-                        }
-                    }
-                    if player_active {
-                        self.arbiter.add_movement(MovementSignal {
-                            layer: PriorityLayer::Control,
-                            vector: player_move,
-                            weight: 1.0,
-                        });
-                    }
-
-                    // Layer 0: Reflex (Stun)
-                    if active_keys.contains(&KeyCode::KeyP) {
-                        self.arbiter.add_movement(MovementSignal {
-                            layer: PriorityLayer::Reflex,
-                            vector: Vec2::ZERO, 
-                            weight: 1.0,
-                        });
-                        // Also add an action blocker
-                        self.arbiter.add_action(ActionSignal {
-                            layer: PriorityLayer::Reflex,
-                            action_id: 0,
-                            active: false,
-                        });
-                    }
-
-                    let final_input_state = self.arbiter.resolve();
-
-                    // Compatibility Map (Vector -> Bits)
-                    let mut compat_state = final_input_state;
-                    let vx = compat_state.analog_axes[0];
-                    let vy = compat_state.analog_axes[1];
-                    let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
-                    let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
-                    let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
-                    let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
-
-                    if vy > 0.1 { compat_state.digital_mask |= 1 << id_up; }
-                    if vy < -0.1 { compat_state.digital_mask |= 1 << id_down; }
-                    if vx < -0.1 { compat_state.digital_mask |= 1 << id_left; }
-                    if vx > 0.1 { compat_state.digital_mask |= 1 << id_right; }
-
-                    game_plugin.api.update(&mut world, &compat_state, dt);
-                    window.request_redraw();
                 }
-                _ => (),
-            }
-        }).unwrap();
+            })
+            .unwrap();
     }
 }
