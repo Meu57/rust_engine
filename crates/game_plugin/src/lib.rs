@@ -31,9 +31,9 @@ impl GameLogic for MyGame {
     fn update(&mut self, world_any: &mut dyn std::any::Any, input: &InputState, dt: f32) {
         let world = world_any.downcast_mut::<World>().expect("Bad world downcast");
 
-        // Run Systems
-        systems::player::update(world, input, dt, &self.actions);
-        systems::enemy::update_spawner(world, &mut self.spawn_timer, dt);
+        // [FIX] Call the functions by their actual names defined in the files
+        systems::player::update_player(world, input, dt, &self.actions);
+        systems::enemy::spawn_enemies(world, &mut self.spawn_timer, dt);
     }
 }
 
