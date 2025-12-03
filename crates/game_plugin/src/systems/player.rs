@@ -16,13 +16,27 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
         velocity = velocity.normalize() * speed * dt;
     }
 
-    if let Some(mut query) = world.query_mut::<CTransform>() {
-        // Simple query for player (naive iteration for demo)
-        // In a real engine, you'd join CPlayer and CTransform
-        for (_, transform) in query.iter_mut() {
-             // Add logic to check if this entity also has CPlayer (omitted for brevity)
-             transform.pos += velocity;
-             transform.pos = transform.pos.clamp(Vec2::ZERO, Vec2::new(1280.0, 720.0));
+    
+    
+    // 1. Collect all entities that are tagged as 'Player'
+    // We do this in a separate block/scope to ensure we are done borrowing 'world' 
+    // before we try to borrow it mutably in the next step.
+    let mut player_ids = Vec::new();
+    if let Some(players) = world.query::<CPlayer>() {
+        for (entity, _) in players.iter() {
+            player_ids.push(*entity);
         }
     }
+
+    // 2. Iterate over Transforms and ONLY move the entities we identified as Players
+    if let Some(mut query) = world.query_mut::<CTransform>() {
+        for (entity, transform) in query.iter_mut() {
+            // Check if this specific entity is in our list of players
+            if player_ids.contains(entity) {
+                transform.pos += velocity;
+                transform.pos = transform.pos.clamp(Vec2::ZERO, Vec2::new(1280.0, 720.0));
+            }
+        }
+    }
+    
 }
