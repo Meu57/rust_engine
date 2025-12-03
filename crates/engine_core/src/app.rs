@@ -1,3 +1,4 @@
+// crates/engine_core/src/app.rs
 use std::sync::Mutex;
 use glam::Vec2;
 use winit::{
@@ -9,10 +10,9 @@ use winit::{
 
 use crate::hot_reload;
 use crate::renderer::Renderer;
-// [FIX] Removed ActionSignal and MovementSignal from here, as they aren't re-exported publicly by input.rs
 use crate::input::{self, ActionRegistry, Arbiter, InputMap};
+use crate::inspector; // <--- Use the new module
 
-// [FIX] Added ActionSignal and MovementSignal here (imported directly from source)
 use engine_shared::{
     CEnemy, CPlayer, CSprite, CTransform, HostInterface, PriorityLayer,
     ActionSignal, MovementSignal,
@@ -67,7 +67,6 @@ impl App {
             .build(&event_loop)
             .unwrap();
 
-        // Initialize EGUI winit state
         self.egui_winit = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -100,7 +99,7 @@ impl App {
             unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
 
         let host_interface = HostInterface {
-            get_action_id: input::host_get_action_id, // Use function from input module
+            get_action_id: input::host_get_action_id,
             log: None,
         };
 
@@ -114,10 +113,7 @@ impl App {
 
                 // Pass event to GUI first
                 if let Some(gui) = &mut self.egui_winit {
-                    if let Event::WindowEvent {
-                        event: ref w_event, ..
-                    } = event
-                    {
+                    if let Event::WindowEvent { event: ref w_event, .. } = event {
                         let _ = gui.on_window_event(&window, w_event);
                     }
                 }
@@ -126,17 +122,13 @@ impl App {
                     Event::WindowEvent { event, .. } => match event {
                         WindowEvent::CloseRequested => elwt.exit(),
 
-                        WindowEvent::KeyboardInput {
-                            event: key_event, ..
-                        } => {
+                        WindowEvent::KeyboardInput { event: key_event, .. } => {
                             if key_event.state == ElementState::Pressed {
                                 if let PhysicalKey::Code(KeyCode::F1) = key_event.physical_key {
                                     self.show_inspector = !self.show_inspector;
-                                    println!("Inspector visibility: {}", self.show_inspector);
                                 }
                             }
 
-                            // Prevent game from reading input if GUI wants it
                             if self.egui_ctx.wants_keyboard_input() {
                                 return;
                             }
@@ -155,54 +147,11 @@ impl App {
                         WindowEvent::Resized(size) => renderer.resize(size),
                         WindowEvent::RedrawRequested => {
                             // --- GUI FRAME START ---
-                            let raw_input =
-                                self.egui_winit.as_mut().unwrap().take_egui_input(&window);
+                            let raw_input = self.egui_winit.as_mut().unwrap().take_egui_input(&window);
                             self.egui_ctx.begin_frame(raw_input);
 
-                            // --- DRAW INSPECTOR ---
-                            if self.show_inspector {
-                                egui::Window::new("Input Inspector")
-                                    .default_pos([10.0, 10.0])
-                                    .show(&self.egui_ctx, |ui| {
-                                        ui.heading("Arbitration Stack");
-                                        ui.separator();
-
-                                        let layers = [
-                                            (PriorityLayer::Reflex, "Layer 0: Reflex (Physics)", egui::Color32::RED),
-                                            (PriorityLayer::Cutscene, "Layer 1: Cutscene", egui::Color32::YELLOW),
-                                            (PriorityLayer::Control, "Layer 2: Player Control", egui::Color32::GREEN),
-                                            (PriorityLayer::Ambient, "Layer 3: Ambient", egui::Color32::GRAY),
-                                        ];
-
-                                        let mut winning_move = PriorityLayer::Ambient;
-                                        for &(layer, _, _) in &layers {
-                                            if self.arbiter.move_signals.iter().any(|s| s.layer == layer) {
-                                                winning_move = layer;
-                                                break;
-                                            }
-                                        }
-
-                                        for (layer, label, color) in layers {
-                                            let is_active = self.arbiter.move_signals.iter().any(|s| s.layer == layer);
-                                            let is_winner = layer == winning_move && is_active;
-
-                                            if is_winner {
-                                                ui.colored_label(color, format!("▶ {} [WINNER]", label));
-                                                for s in self.arbiter.move_signals.iter().filter(|s| s.layer == layer) {
-                                                    ui.label(format!("   Vector: {:.2}, Weight: {:.2}", s.vector, s.weight));
-                                                }
-                                            } else if is_active {
-                                                ui.colored_label(color.linear_multiply(0.5), format!("▷ {} [SUPPRESSED]", label));
-                                            } else {
-                                                ui.label(format!("  {}", label));
-                                            }
-                                        }
-
-                                        ui.separator();
-                                        ui.label("Press 'P' to simulate Reflex Layer override.");
-                                        ui.colored_label(egui::Color32::LIGHT_GRAY, "Press 'F1' to hide this window.");
-                                    });
-                            }
+                            // Delegate inspector drawing to the separate module
+                            inspector::show(&self.egui_ctx, &self.arbiter, &mut self.show_inspector);
 
                             // --- GUI FRAME END ---
                             let gui_output = self.egui_ctx.end_frame();
@@ -217,11 +166,9 @@ impl App {
                     },
                     Event::AboutToWait => {
                         let dt = 1.0 / 60.0;
-
-                        // --- ARBITRATION LOGIC ---
                         self.arbiter.clear();
 
-                        // Layer 2: Player
+                        // Layer 2: Player Input Logic
                         let mut player_move = Vec2::ZERO;
                         let mut player_active = false;
                         for &key in &active_keys {
@@ -266,11 +213,11 @@ impl App {
                         }
 
                         let final_input_state = self.arbiter.resolve();
-
-                        // Compatibility Map
+                        
+                        // Compatibility mapping for simple plugins
                         let mut compat_state = final_input_state;
-                        let vx = compat_state.analog_axes[0];
                         let vy = compat_state.analog_axes[1];
+                        let vx = compat_state.analog_axes[0];
                         let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
                         let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
                         let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);

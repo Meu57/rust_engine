@@ -4,6 +4,7 @@
 // Logic Modules
 pub mod app;
 pub mod input;
+pub mod inspector; // <--- New Module
 
 // Internal Implementation Modules
 mod hot_reload;
