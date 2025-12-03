@@ -19,7 +19,7 @@ use renderer::Renderer;
 use engine_shared::{
     ActionId, ACTION_NOT_FOUND, HostInterface, InputState, MAX_AXES,
     CTransform, CSprite, CPlayer, CEnemy,
-    PriorityLayer, MovementSignal, ActionSignal, // <--- New Imports
+    PriorityLayer, MovementSignal, ActionSignal,
 };
 
 use engine_ecs::World; 
@@ -60,8 +60,7 @@ impl InputMap {
     }
 }
 
-// --- 3. THE ARBITER (New System) ---
-/// The logic brain that filters conflicting signals.
+// --- 3. THE ARBITER (With Accessors for GUI) ---
 #[derive(Default)]
 struct Arbiter {
     move_signals: Vec<MovementSignal>,
@@ -82,27 +81,19 @@ impl Arbiter {
         self.action_signals.push(signal);
     }
 
-    /// The Core "Subsumption" Logic
     fn resolve(&self) -> InputState {
         let mut state = InputState::default();
 
         // A. Resolve Movement
-        // Rule: Identify the "Winning Layer" (Lowest Enum Value = Highest Priority)
-        // that has ANY non-zero input.
         let mut winning_move_layer = PriorityLayer::Ambient;
-        
-        // Find highest priority layer present in the buffer
-        // (Iterate layers 0..3)
         for &layer in &[PriorityLayer::Reflex, PriorityLayer::Cutscene, PriorityLayer::Control] {
             let has_signal = self.move_signals.iter().any(|s| s.layer == layer);
             if has_signal {
                 winning_move_layer = layer;
-                break; // Found the boss. Stop looking.
+                break;
             }
         }
 
-        // Sum vectors ONLY from the winning layer (Vector Blending)
-        // [Cite: Input_Handeling_0.pdf, Page 109 - "Vector Blending Overlay"]
         let mut final_vector = Vec2::ZERO;
         for s in &self.move_signals {
             if s.layer == winning_move_layer {
@@ -110,19 +101,14 @@ impl Arbiter {
             }
         }
 
-        // Clamp to unit circle (analog stick behavior)
         if final_vector.length_squared() > 1.0 {
             final_vector = final_vector.normalize();
         }
         
-        // Write to axes (Arbitrary mapping: Axis 0=X, Axis 1=Y)
         state.analog_axes[0] = final_vector.x;
         state.analog_axes[1] = final_vector.y;
 
-
         // B. Resolve Actions (Digital)
-        // Rule: Strict Layer Dominance. If Layer 0 is active, Layer 2 inputs are ignored.
-        // First, find the highest priority layer that is emitting ANY action signal.
         let mut winning_action_layer = PriorityLayer::Ambient;
          for &layer in &[PriorityLayer::Reflex, PriorityLayer::Cutscene, PriorityLayer::Control] {
             let has_signal = self.action_signals.iter().any(|s| s.layer == layer);
@@ -132,7 +118,6 @@ impl Arbiter {
             }
         }
 
-        // Apply only bits from the winner
         for s in &self.action_signals {
             if s.layer == winning_action_layer && s.active {
                 if (s.action_id as usize) < 64 {
@@ -144,7 +129,6 @@ impl Arbiter {
         state
     }
 }
-
 
 // --- 4. GLOBAL ACCESS (FFI) ---
 static GLOBAL_REGISTRY: OnceLock<Mutex<ActionRegistry>> = OnceLock::new();
@@ -168,8 +152,11 @@ extern "C" fn host_get_action_id(name_ptr: *const u8, name_len: usize) -> Action
 pub struct App {
     registry: ActionRegistry,
     input_map: InputMap,
-    arbiter: Arbiter, // <--- Added Arbiter
+    arbiter: Arbiter,
     window_title: String,
+    // GUI State
+    egui_ctx: egui::Context,
+    egui_winit: Option<egui_winit::State>,
 }
 
 impl App {
@@ -177,26 +164,25 @@ impl App {
         let mut registry = ActionRegistry::default();
         let mut input_map = InputMap::default();
 
-        // Host defines the canonical action set
         let move_up = registry.register("MoveUp");
         let move_down = registry.register("MoveDown");
         let move_left = registry.register("MoveLeft");
         let move_right = registry.register("MoveRight");
 
-        // W/A/S/D bindings
         input_map.bind(KeyCode::KeyW, move_up);
         input_map.bind(KeyCode::KeyS, move_down);
         input_map.bind(KeyCode::KeyA, move_left);
         input_map.bind(KeyCode::KeyD, move_right);
 
-        // Publish snapshot for FFI
         let _ = GLOBAL_REGISTRY.set(Mutex::new(registry.clone()));
 
         Self { 
             registry, 
             input_map, 
             arbiter: Arbiter::default(),
-            window_title: "Rust Engine: Arbitration Demo".to_string() 
+            window_title: "Rust Engine: Input Inspector".to_string(),
+            egui_ctx: egui::Context::default(),
+            egui_winit: None,
         }
     }
 
@@ -207,6 +193,15 @@ impl App {
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
             .build(&event_loop)
             .unwrap();
+
+        // Initialize EGUI winit state
+        self.egui_winit = Some(egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+        ));
 
         let mut renderer = pollster::block_on(Renderer::new(&window));
         let mut world = World::new();
@@ -221,7 +216,6 @@ impl App {
         world.add_component(player, CPlayer);
         world.add_component(player, CSprite::default());
 
-        // Load Plugin
         let plugin_path = "target/debug/game_plugin.dll";
         let mut game_plugin = unsafe {
             hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin")
@@ -234,19 +228,27 @@ impl App {
 
         game_plugin.api.on_load(&mut world, &host_interface);
 
-        // Track raw key state for the demo
         let mut active_keys: Vec<KeyCode> = Vec::new();
 
         event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Poll); 
+
+            // Pass event to GUI first
+            if let Some(gui) = &mut self.egui_winit {
+                if let Event::WindowEvent { event: ref w_event, .. } = event {
+                    let _ = gui.on_window_event(&window, w_event);
+                }
+            }
 
             match event {
                 Event::WindowEvent { event, .. } => match event {
                     WindowEvent::CloseRequested => elwt.exit(),
                     
                     WindowEvent::KeyboardInput { event: key_event, .. } => {
+                        // Prevent game from reading input if GUI wants it (simple check)
+                        if self.egui_ctx.wants_keyboard_input() { return; }
+
                         if let PhysicalKey::Code(keycode) = key_event.physical_key {
-                            // Simple tracker to keep list of held keys
                             if key_event.state == ElementState::Pressed {
                                 if !active_keys.contains(&keycode) { active_keys.push(keycode); }
                             } else {
@@ -256,33 +258,84 @@ impl App {
                     }
                     
                     WindowEvent::Resized(size) => renderer.resize(size),
-                    WindowEvent::RedrawRequested => { let _ = renderer.render(&world); }
+                    WindowEvent::RedrawRequested => { 
+                        // --- GUI FRAME START ---
+                        let raw_input = self.egui_winit.as_mut().unwrap().take_egui_input(&window);
+                        self.egui_ctx.begin_frame(raw_input);
+
+                        // --- DRAW INSPECTOR ---
+                        egui::Window::new("Input Inspector")
+                            .default_pos([10.0, 10.0])
+                            .show(&self.egui_ctx, |ui| {
+                                ui.heading("Arbitration Stack");
+                                ui.separator();
+
+                                // Visualize Layers
+                                let layers = [
+                                    (PriorityLayer::Reflex, "Layer 0: Reflex (Physics)", egui::Color32::RED),
+                                    (PriorityLayer::Cutscene, "Layer 1: Cutscene", egui::Color32::YELLOW),
+                                    (PriorityLayer::Control, "Layer 2: Player Control", egui::Color32::GREEN),
+                                    (PriorityLayer::Ambient, "Layer 3: Ambient", egui::Color32::GRAY),
+                                ];
+
+                                // Find winners
+                                let mut winning_move = PriorityLayer::Ambient;
+                                for &(layer, _, _) in &layers {
+                                    if self.arbiter.move_signals.iter().any(|s| s.layer == layer) {
+                                        winning_move = layer;
+                                        break; 
+                                    }
+                                }
+
+                                for (layer, label, color) in layers {
+                                    let is_active = self.arbiter.move_signals.iter().any(|s| s.layer == layer);
+                                    let is_winner = layer == winning_move && is_active;
+
+                                    if is_winner {
+                                        ui.colored_label(color, format!("▶ {} [WINNER]", label));
+                                        // Show signals
+                                        for s in self.arbiter.move_signals.iter().filter(|s| s.layer == layer) {
+                                            ui.label(format!("   Vector: {:.2}, Weight: {:.2}", s.vector, s.weight));
+                                        }
+                                    } else if is_active {
+                                        ui.colored_label(color.linear_multiply(0.5), format!("▷ {} [SUPPRESSED]", label));
+                                    } else {
+                                        ui.label(format!("  {}", label));
+                                    }
+                                }
+                                
+                                ui.separator();
+                                ui.label("Press 'P' to simulate Reflex Layer override.");
+                            });
+
+                        // --- GUI FRAME END ---
+                        let gui_output = self.egui_ctx.end_frame();
+                        let primitives = self.egui_ctx.tessellate(gui_output.shapes, 1.0);
+                        let textures_delta = gui_output.textures_delta;
+
+                        self.egui_winit.as_mut().unwrap().handle_platform_output(&window, gui_output.platform_output);
+
+                        let _ = renderer.render(&world, Some((&self.egui_ctx, &primitives, &textures_delta))); 
+                    }
                     _ => (),
                 },
                 Event::AboutToWait => {
                     let dt = 1.0 / 60.0;
 
-                    // --- STEP 1: GATHER SIGNALS ---
+                    // --- ARBITRATION LOGIC (Same as Phase 2) ---
                     self.arbiter.clear();
 
-                    // A. Process Layer 2 (Player Control)
-                    // Convert raw W/A/S/D keys into Movement Intent
+                    // Layer 2: Player
                     let mut player_move = Vec2::ZERO;
                     let mut player_active = false;
-
                     for &key in &active_keys {
                         if let Some(action_id) = self.input_map.map_signal_to_intent(key) {
-                            // Map Actions to Bits
                             self.arbiter.add_action(ActionSignal {
                                 layer: PriorityLayer::Control,
                                 action_id,
                                 active: true,
                             });
-
-                            // Map Keys to Vector (Hardcoded for this demo, usually data-driven)
-                            // We need to know which action ID maps to which vector direction
-                            // Ideally we store this in metadata, but for now:
-                            // Check Action IDs by looking up string (slow but fine for demo)
+                            // Basic mapping for demo
                             let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
                             let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
                             let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
@@ -294,7 +347,6 @@ impl App {
                             if action_id == id_right { player_move.x += 1.0; player_active = true; }
                         }
                     }
-
                     if player_active {
                         self.arbiter.add_movement(MovementSignal {
                             layer: PriorityLayer::Control,
@@ -303,45 +355,27 @@ impl App {
                         });
                     }
 
-                    // B. Process Layer 0 (Reflex/Stun) - THE DEMO
-                    // If user holds 'P', we inject a Reflex signal that overrides everything.
+                    // Layer 0: Reflex (Stun)
                     if active_keys.contains(&KeyCode::KeyP) {
-                        // "P" for Punish/Pause
-                        // We add a signal to Layer 0.
-                        // Vector is ZERO (Freeze).
                         self.arbiter.add_movement(MovementSignal {
                             layer: PriorityLayer::Reflex,
                             vector: Vec2::ZERO, 
                             weight: 1.0,
                         });
-                        
-                        // Also block actions? 
-                        // By adding an empty/dummy action signal to Reflex, 
-                        // we force the Action Arbiter to select Reflex layer (which has 0 bits set).
+                        // Also add an action blocker
                         self.arbiter.add_action(ActionSignal {
                             layer: PriorityLayer::Reflex,
-                            action_id: 0, 
-                            active: false, // "I am active, but I am pressing nothing."
+                            action_id: 0,
+                            active: false,
                         });
                     }
 
-                    // --- STEP 2: RESOLVE ---
                     let final_input_state = self.arbiter.resolve();
 
-                    // --- STEP 3: UPDATE PLUGIN ---
-                    // Note: We need to make sure the Plugin looks at Axes for movement now,
-                    // or we map the axes back to bits for backward compat.
-                    // For now, let's map Axes -> Bits in the Arbiter output so the old Plugin logic still works!
-                    // (See Arbiter resolve: it writes bits. But wait, we calculated Vector.)
-                    // Fix: The plugin expects Digital Bits for movement (MoveUp/Down).
-                    // We should update the Plugin to use Analog Axes OR map the resolved vector back to bits here.
-                    // Let's map Vector -> Bits for compatibility.
-                    
+                    // Compatibility Map (Vector -> Bits)
                     let mut compat_state = final_input_state;
                     let vx = compat_state.analog_axes[0];
                     let vy = compat_state.analog_axes[1];
-                    
-                    // Thresholds to trigger digital buttons from analog result
                     let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
                     let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
                     let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);

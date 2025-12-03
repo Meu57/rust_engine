@@ -26,3 +26,8 @@ pollster = "0.3"
 bytemuck = { version = "1.14", features = ["derive"] }
 
 libloading = "0.8" # Standard crate for dynamic library loading
+
+# --- NEW GUI DEPENDENCIES ---
+egui = "0.27"
+egui-winit = "0.27"
+egui-wgpu = "0.27"
