@@ -125,6 +125,7 @@ impl Renderer {
             multiview: None,
         });
 
+        // Initial buffer for 100 instances
         let instance_data = vec![InstanceRaw { model: [[0.0;4];4], color: [0.0;4] }; 100];
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
@@ -156,7 +157,6 @@ impl Renderer {
         }
     }
 
-    // Updated render method to Fix Render Order: Game First -> UI Second
     pub fn render(
         &mut self, 
         world: &World, 
@@ -183,13 +183,27 @@ impl Renderer {
             }
         }
 
-        self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+        // [FIX] Dynamic Buffer Resizing
+        // Check if the current buffer is large enough for the new data.
+        let instance_bytes = bytemuck::cast_slice(&instances);
+        if (instance_bytes.len() as wgpu::BufferAddress) > self.instance_buffer.size() {
+            // Buffer is too small; destroy it and create a larger one.
+            self.instance_buffer.destroy();
+            self.instance_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: instance_bytes,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        } else {
+            // Buffer is large enough; just update it.
+            self.queue.write_buffer(&self.instance_buffer, 0, instance_bytes);
+        }
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
 
-        // 2. DRAW GAME (Submit Game Pass First)
+        // 2. DRAW GAME (Record Game Pass)
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -211,28 +225,23 @@ impl Renderer {
             render_pass.draw(0..4, 0..instances.len() as u32);
         }
 
-        // [FIX] Submit the Game Encoder to the GPU *before* starting the GUI encoder.
-        // This ensures the game is drawn and the screen is cleared appropriately before we draw the UI on top.
+        // Submit Game Pass FIRST
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // 3. DRAW GUI (Overlay)
         if let Some((ctx, primitives, delta)) = gui_ctx {
-            // Update textures
             for (id, image_delta) in &delta.set {
                 self.gui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
             }
 
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
-                // [FIX] Use the dynamic pixels_per_point from the context
                 pixels_per_point: ctx.pixels_per_point(), 
             };
 
-            // Prepare buffers
             let mut command_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Gui Encoder") });
             self.gui_renderer.update_buffers(&self.device, &self.queue, &mut command_encoder, primitives, &screen_descriptor);
             
-            // Execute GUI Pass
             {
                 let mut gui_pass = command_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Gui Render Pass"),
@@ -240,7 +249,6 @@ impl Renderer {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            // [FIX] LoadOp::Load ensures we draw ON TOP of the existing game scene
                             load: wgpu::LoadOp::Load, 
                             store: wgpu::StoreOp::Store,
                         },
@@ -252,17 +260,14 @@ impl Renderer {
                 self.gui_renderer.render(&mut gui_pass, primitives, &screen_descriptor);
             }
             
-            // Free textures
             for id in &delta.free {
                 self.gui_renderer.free_texture(id);
             }
             
-            // Submit the GUI commands to the GPU *after* the game
             self.queue.submit(std::iter::once(command_encoder.finish()));
         }
 
         output.present();
-
         Ok(())
     }
 }
