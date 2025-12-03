@@ -212,7 +212,7 @@ impl Renderer {
         }
 
         // 3. DRAW GUI (Overlay)
-        if let Some((_ctx, primitives, delta)) = gui_ctx {
+        if let Some((ctx, primitives, delta)) = gui_ctx {
             // Update textures
             for (id, image_delta) in &delta.set {
                 self.gui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
@@ -220,7 +220,7 @@ impl Renderer {
 
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
-                pixels_per_point: 1.0, // Should be window scale factor
+                pixels_per_point: ctx.pixels_per_point(), // Should be window scale factor
             };
 
             // Prepare buffers

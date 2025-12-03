@@ -310,7 +310,7 @@ impl App {
 
                         // --- GUI FRAME END ---
                         let gui_output = self.egui_ctx.end_frame();
-                        let primitives = self.egui_ctx.tessellate(gui_output.shapes, 1.0);
+                        let primitives = self.egui_ctx.tessellate(gui_output.shapes, gui_output.pixels_per_point);
                         let textures_delta = gui_output.textures_delta;
 
                         self.egui_winit.as_mut().unwrap().handle_platform_output(&window, gui_output.platform_output);
