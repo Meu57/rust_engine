@@ -17,17 +17,13 @@ use crate::hot_reload;
 use crate::renderer::Renderer;
 use crate::input::{self, ActionRegistry, Arbiter, InputMap};
 use crate::inspector;
-use notify::{Watcher, RecommendedWatcher, RecursiveMode, Config};
-use crossbeam_channel::{unbounded, Receiver};
-
 use engine_shared::{
     CEnemy, CPlayer, CSprite, CTransform, HostInterface, PriorityLayer,
     ActionSignal, MovementSignal,
 };
 use engine_ecs::World;
 
-/// Host-side spawn function exposed to plugins via HostInterface.vtable
-/// Safety: `world_ptr` must be a valid pointer to the host's World (opaque to plugin)
+/// Host-side spawn function exposed to plugins via HostInterface
 extern "C" fn host_spawn_enemy(world_ptr: *mut c_void, x: f32, y: f32) {
     if world_ptr.is_null() {
         eprintln!("host_spawn_enemy called with null world_ptr");
@@ -72,14 +68,11 @@ impl App {
         let move_left = registry.register("MoveLeft");
         let move_right = registry.register("MoveRight");
 
-        // Bind using logical keys for now (exposed API: bind_logical)
-        // You can add physical bindings separately via input_map.bind_physical(...)
         input_map.bind_logical(KeyCode::KeyW, move_up);
         input_map.bind_logical(KeyCode::KeyS, move_down);
         input_map.bind_logical(KeyCode::KeyA, move_left);
         input_map.bind_logical(KeyCode::KeyD, move_right);
 
-        // Initialize the global registry for FFI
         let _ = input::GLOBAL_REGISTRY.set(Mutex::new(registry.clone()));
 
         Self {
@@ -101,7 +94,6 @@ impl App {
             .build(&event_loop)
             .unwrap();
 
-        // Initialize egui_winit state (use current scale factor)
         self.egui_winit = Some(egui_winit::State::new(
             self.egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -129,34 +121,36 @@ impl App {
         world.add_component(player, CPlayer);
         world.add_component(player, CSprite::default());
 
-        // Plugin path (string literal so it's 'static within closure)
+        // Plugin path
         let plugin_path: &'static str = "target/debug/game_plugin.dll";
 
-        // Initial load (fail here so developer notices early problems)
+        // Initial load
         let mut game_plugin =
             unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
 
-        // Build HostInterface V-table (now includes spawn_enemy)
+        // Build HostInterface
         let host_interface = HostInterface {
             get_action_id: input::host_get_action_id,
             log: None,
-            spawn_enemy: host_spawn_enemy, // register the host spawn function
+            spawn_enemy: host_spawn_enemy,
         };
 
         // Initial negotiation with plugin
-        game_plugin.api.on_load(&mut world, &host_interface);
+        unsafe {
+            (game_plugin.api.on_load)(
+                game_plugin.api.state,
+                &mut world as *mut _ as *mut c_void,
+                &host_interface,
+            );
+        }
 
-        // Track held logical keys (KeyCode).
         let mut active_keys: Vec<KeyCode> = Vec::new();
-
-        // Small debounce so holding F5 doesn't spam reload attempts
         let mut last_reload: Option<Instant> = None;
         let reload_debounce = Duration::from_millis(500);
 
         event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Poll);
 
-            // Pass window events to egui first
             if let Some(gui_state) = &mut self.egui_winit {
                 if let Event::WindowEvent { event: ref w_event, .. } = event {
                     let _ = gui_state.on_window_event(&window, w_event);
@@ -168,14 +162,13 @@ impl App {
                     WindowEvent::CloseRequested => elwt.exit(),
 
                     WindowEvent::KeyboardInput { event: key_event, .. } => {
-                        // Toggle inspector on F1 (using physical key)
                         if key_event.state == ElementState::Pressed {
                             if let PhysicalKey::Code(KeyCode::F1) = key_event.physical_key {
                                 self.show_inspector = !self.show_inspector;
                             }
                         }
 
-                        // HOT-RELOAD TRIGGER: F5, debounced
+                        // HOT-RELOAD TRIGGER
                         if key_event.state == ElementState::Pressed {
                             if let PhysicalKey::Code(KeyCode::F5) = key_event.physical_key {
                                 let now = Instant::now();
@@ -190,7 +183,11 @@ impl App {
                                         match hot_reload::GamePlugin::load(plugin_path) {
                                             Ok(mut new_plugin) => {
                                                 // Call on_load on the new plugin so it can renegotiate IDs.
-                                                new_plugin.api.on_load(&mut world, &host_interface);
+                                                (new_plugin.api.on_load)(
+                                                    new_plugin.api.state,
+                                                    &mut world as *mut _ as *mut c_void,
+                                                    &host_interface
+                                                );
 
                                                 // Swap: dropping old plugin will unload old lib.
                                                 game_plugin = new_plugin;
@@ -206,12 +203,10 @@ impl App {
                             }
                         }
 
-                        // Let egui capture keyboard first if it wants it
                         if self.egui_ctx.wants_keyboard_input() {
                             return;
                         }
 
-                        // Track held keys (logical KeyCode)
                         if let PhysicalKey::Code(keycode) = key_event.physical_key {
                             if key_event.state == ElementState::Pressed {
                                 if !active_keys.contains(&keycode) {
@@ -226,17 +221,12 @@ impl App {
                     WindowEvent::Resized(size) => renderer.resize(size),
 
                     WindowEvent::RedrawRequested => {
-                        // --- GUI FRAME START ---
                         let raw_input = self.egui_winit.as_mut().unwrap().take_egui_input(&window);
                         self.egui_ctx.begin_frame(raw_input);
 
-                        // Inspector UI
                         inspector::show(&self.egui_ctx, &self.arbiter, &mut self.show_inspector);
 
-                        // --- GUI FRAME END ---
                         let gui_output = self.egui_ctx.end_frame();
-
-                        // tessellate using the actual pixels_per_point used by egui
                         let primitives = self.egui_ctx.tessellate(
                             gui_output.shapes,
                             gui_output.pixels_per_point,
@@ -248,7 +238,6 @@ impl App {
                             .unwrap()
                             .handle_platform_output(&window, gui_output.platform_output);
 
-                        // Render: pass egui primitives & textures to renderer (renderer must accept this signature)
                         let _ = renderer.render(&world, Some((&self.egui_ctx, &primitives, &textures_delta)));
                     }
 
@@ -258,18 +247,13 @@ impl App {
                 Event::AboutToWait => {
                     let dt = 1.0 / 60.0;
 
-                    // Clear arbiter buffers each frame
                     self.arbiter.clear();
 
-                    // --- Layer 2: Player Input Logic (Control) ---
                     let mut player_move = Vec2::ZERO;
                     let mut player_active = false;
 
                     for &key in &active_keys {
-                        // Create a PhysicalKey for intent resolution (fallback).
                         let physical = PhysicalKey::Code(key);
-
-                        // Resolve intent using logical+physical mapping.
                         if let Some(action_id) = self.input_map.map_signal_to_intent(Some(key), physical) {
                             self.arbiter.add_action(ActionSignal {
                                 layer: PriorityLayer::Control,
@@ -282,22 +266,10 @@ impl App {
                             let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
                             let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
 
-                            if action_id == id_up {
-                                player_move.y += 1.0;
-                                player_active = true;
-                            }
-                            if action_id == id_down {
-                                player_move.y -= 1.0;
-                                player_active = true;
-                            }
-                            if action_id == id_left {
-                                player_move.x -= 1.0;
-                                player_active = true;
-                            }
-                            if action_id == id_right {
-                                player_move.x += 1.0;
-                                player_active = true;
-                            }
+                            if action_id == id_up { player_move.y += 1.0; player_active = true; }
+                            if action_id == id_down { player_move.y -= 1.0; player_active = true; }
+                            if action_id == id_left { player_move.x -= 1.0; player_active = true; }
+                            if action_id == id_right { player_move.x += 1.0; player_active = true; }
                         }
                     }
 
@@ -309,15 +281,12 @@ impl App {
                         });
                     }
 
-                    // --- Layer 0: Reflex (Stun) demo ---
                     if active_keys.contains(&KeyCode::KeyP) {
                         self.arbiter.add_movement(MovementSignal {
                             layer: PriorityLayer::Reflex,
                             vector: Vec2::ZERO,
                             weight: 1.0,
                         });
-
-                        // Add an empty reflex action to force layer dominance for actions
                         self.arbiter.add_action(ActionSignal {
                             layer: PriorityLayer::Reflex,
                             action_id: 0,
@@ -325,10 +294,9 @@ impl App {
                         });
                     }
 
-                    // Resolve arbiter into final InputState
                     let final_input_state = self.arbiter.resolve();
 
-                    // Backwards compatibility mapping: analog -> digital bits
+                    // Compatibility mapping
                     let mut compat_state = final_input_state;
                     let vy = compat_state.analog_axes[1];
                     let vx = compat_state.analog_axes[0];
@@ -337,24 +305,21 @@ impl App {
                     let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
                     let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
 
-                    if vy > 0.1 {
-                        compat_state.digital_mask |= 1 << id_up;
-                    }
-                    if vy < -0.1 {
-                        compat_state.digital_mask |= 1 << id_down;
-                    }
-                    if vx < -0.1 {
-                        compat_state.digital_mask |= 1 << id_left;
-                    }
-                    if vx > 0.1 {
-                        compat_state.digital_mask |= 1 << id_right;
+                    if vy > 0.1 { compat_state.digital_mask |= 1 << id_up; }
+                    if vy < -0.1 { compat_state.digital_mask |= 1 << id_down; }
+                    if vx < -0.1 { compat_state.digital_mask |= 1 << id_left; }
+                    if vx > 0.1 { compat_state.digital_mask |= 1 << id_right; }
+
+                    // Send resolved state to plugin via VTable
+                    unsafe {
+                        (game_plugin.api.update)(
+                            game_plugin.api.state,
+                            &mut world as *mut _ as *mut c_void,
+                            &compat_state,
+                            dt
+                        );
                     }
 
-                    // Send resolved state to plugin
-                    // Note: plugin should not mutate the World directly; it should request actions via HostInterface.
-                    game_plugin.api.update(&mut world, &compat_state, dt);
-
-                    // Request redraw after update
                     window.request_redraw();
                 }
 

@@ -3,14 +3,16 @@
 mod systems;
 
 use std::ffi::c_void;
-use engine_shared::{GameLogic, InputState, HostInterface, ActionId, ACTION_NOT_FOUND, ENGINE_API_VERSION};
+
+use engine_shared::{
+    PluginApi, HostInterface, InputState, GameLogic, ActionId, ACTION_NOT_FOUND, ENGINE_API_VERSION,
+};
 use engine_ecs::World;
 
-/// Game plugin instance
+/// Concrete plugin instance
 pub struct MyGame {
     spawn_timer: f32,
     actions: [ActionId; 4],
-    // Optional host-provided spawn function pointer (set in on_load)
     spawn_fn: Option<extern "C" fn(*mut c_void, f32, f32)>,
 }
 
@@ -24,53 +26,91 @@ impl Default for MyGame {
     }
 }
 
-impl GameLogic for MyGame {
-    fn on_load(&mut self, _world: &mut dyn std::any::Any, host: &HostInterface) {
-        // Resolve action IDs from host
+impl MyGame {
+    // Logic split into "do_" functions to keep FFI shims clean
+    fn do_on_load(&mut self, _world_any: &mut dyn std::any::Any, host: &HostInterface) {
+        // Resolve action ids via host
         self.actions[0] = (host.get_action_id)(b"MoveUp".as_ptr(), 6);
         self.actions[1] = (host.get_action_id)(b"MoveDown".as_ptr(), 8);
         self.actions[2] = (host.get_action_id)(b"MoveLeft".as_ptr(), 8);
         self.actions[3] = (host.get_action_id)(b"MoveRight".as_ptr(), 9);
 
-        // Save host-provided spawn function (if available)
-        // Note: HostInterface.spawn_enemy must be declared as `extern "C" fn(*mut c_void, f32, f32)`
-        // in engine_shared::HostInterface. If HostInterface.spawn_enemy is optional (Option<...>),
-        // adjust this assignment accordingly.
+        // Capture the host-provided spawn function
         self.spawn_fn = Some(host.spawn_enemy);
     }
 
-    fn update(&mut self, world_any: &mut dyn std::any::Any, input: &InputState, dt: f32) {
-        // Downcast to the concrete World only to read/query local state in the plugin.
-        // The plugin must NOT mutate the host world directly.
-        let world = world_any.downcast_mut::<World>().expect("Bad world downcast");
+    fn do_update(&mut self, world_any: &mut dyn std::any::Any, input: &InputState, dt: f32) {
+        // DOWNCAST ONLY FOR READ/QUERY (plugin should not perform host allocations directly)
+        let world = match world_any.downcast_mut::<World>() {
+            Some(w) => w,
+            None => {
+                eprintln!("Plugin Error: Failed to downcast World.");
+                return; 
+            }, 
+        };
 
-        // Player update uses the action IDs resolved earlier
+        // Update player logic (reads input, writes via safe queries)
         systems::player::update_player(world, input, dt, &self.actions);
 
-        // If host spawn function is present, call it via opaque pointer
+        // Spawn via host callback (allocation happens in host)
         if let Some(spawn_fn) = self.spawn_fn {
-            // Cast World to void pointer (opaque to plugin, host will cast back)
             let world_ptr = world as *mut World as *mut c_void;
-
-            // Delegate enemy spawning to systems::enemy, which will call the host function.
-            // systems::enemy::spawn_enemies should accept:
-            //   (spawn_fn: extern "C" fn(*mut c_void, f32, f32), world_ptr: *mut c_void, spawn_timer: &mut f32, dt: f32)
             systems::enemy::spawn_enemies(spawn_fn, world_ptr, &mut self.spawn_timer, dt);
-        } else {
-            // Fallback: if the host didn't provide spawn function, you could avoid spawning
-            // or use a local fallback (not recommended). For now, do nothing.
         }
     }
 }
 
-//
-// FFI exports
-//
+// -------------------------
+// FFI Shim Functions
+// -------------------------
+
+extern "C" fn shim_on_load(state: *mut c_void, world: *mut c_void, host: &HostInterface) {
+    if state.is_null() || world.is_null() { return; }
+    unsafe {
+        let game: &mut MyGame = &mut *(state as *mut MyGame);
+        let world_any: &mut dyn std::any::Any = &mut *(world as *mut dyn std::any::Any);
+        game.do_on_load(world_any, host);
+    }
+}
+
+extern "C" fn shim_update(state: *mut c_void, world: *mut c_void, input: &InputState, dt: f32) {
+    if state.is_null() || world.is_null() { return; }
+    unsafe {
+        let game: &mut MyGame = &mut *(state as *mut MyGame);
+        let world_any: &mut dyn std::any::Any = &mut *(world as *mut dyn std::any::Any);
+        game.do_update(world_any, input, dt);
+    }
+}
+
+extern "C" fn shim_on_unload(_state: *mut c_void, _world: *mut c_void) {
+    // Optional; left empty for now.
+}
+
+extern "C" fn shim_drop(state: *mut c_void) {
+    if state.is_null() { return; }
+    unsafe {
+        // Box::from_raw to free plugin-owned heap memory safely inside the plugin.
+        let _boxed: Box<MyGame> = Box::from_raw(state as *mut MyGame);
+        // _boxed is dropped here, freeing memory
+    }
+}
+
+// -------------------------
+// Exports
+// -------------------------
 
 #[no_mangle]
-pub extern "C" fn _create_game() -> *mut dyn GameLogic {
-    let g: Box<dyn GameLogic> = Box::new(MyGame::default());
-    Box::into_raw(g)
+pub extern "C" fn _create_game() -> PluginApi {
+    let boxed = Box::new(MyGame::default());
+    let state_ptr = Box::into_raw(boxed) as *mut c_void;
+
+    PluginApi {
+        state: state_ptr,
+        on_load: shim_on_load,
+        update: shim_update,
+        on_unload: shim_on_unload,
+        drop: shim_drop,
+    }
 }
 
 #[no_mangle]

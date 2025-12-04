@@ -6,12 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use engine_shared::{GameLogic, ENGINE_API_VERSION};
+use engine_shared::{PluginApi, ENGINE_API_VERSION};
 
 pub struct GamePlugin {
-    pub api: Box<dyn GameLogic>,
-    // We keep the library handle here. When GamePlugin is dropped, 
-    // _lib is dropped, which unloads the DLL.
+    pub api: PluginApi,
     _lib: Library, 
     pub plugin_path: PathBuf,
 }
@@ -24,8 +22,6 @@ impl GamePlugin {
         }
 
         // 1. Copy to a unique path to avoid file locking issues on Windows
-        //    If we just used "game_plugin_loaded.dll", the OS might lock it 
-        //    preventing the NEXT reload from writing to it.
         let copied_path = unique_copy_path(original)?;
         
         fs::copy(original, &copied_path).map_err(|e| {
@@ -38,21 +34,13 @@ impl GamePlugin {
         })?;
 
         // 3. Version Handshake
-        // We define the function signature type
         type VersionFn = unsafe extern "C" fn() -> u32;
-
-        // We try to find the symbol. We use the type `VersionFn` directly.
         let version_func: Symbol<VersionFn> = match lib.get(b"get_api_version") {
             Ok(sym) => sym,
-            Err(e) => {
-                // Cleanup before returning error
-                return Err(format!("Plugin missing 'get_api_version' export: {}", e).into());
-            }
+            Err(e) => return Err(format!("Plugin missing 'get_api_version' export: {}", e).into()),
         };
 
-        // Call the function
         let plugin_version = version_func();
-
         if plugin_version != ENGINE_API_VERSION {
             return Err(format!(
                 "Plugin Version Mismatch! Engine: {}, Plugin: {}", 
@@ -60,20 +48,14 @@ impl GamePlugin {
             ).into());
         }
 
-        // 4. Load the Game Logic
-        type CreateFn = unsafe extern "C" fn() -> *mut dyn GameLogic;
-        
+        // 4. Load the Plugin API
+        type CreateFn = unsafe extern "C" fn() -> PluginApi;
         let create_func: Symbol<CreateFn> = match lib.get(b"_create_game") {
             Ok(sym) => sym,
             Err(e) => return Err(format!("Plugin missing '_create_game' export: {}", e).into()),
         };
 
-        let raw_ptr = create_func();
-        if raw_ptr.is_null() {
-            return Err("Plugin returned a null pointer for GameLogic".into());
-        }
-
-        let api = Box::from_raw(raw_ptr);
+        let api = create_func();
 
         Ok(Self {
             api,
@@ -101,12 +83,13 @@ fn unique_copy_path(original: &Path) -> Result<PathBuf, Box<dyn Error>> {
     Ok(original.with_file_name(new_name))
 }
 
-// Optional: Implement Drop to clean up the temporary DLL file when the plugin is unloaded
+// Clean up the temporary DLL file when the plugin is unloaded
 impl Drop for GamePlugin {
     fn drop(&mut self) {
+        // Important: Let the plugin free its own state memory before we unload the lib
+        (self.api.drop)(self.api.state);
+
         // Attempt to delete the temporary file. 
-        // On Windows, this might fail if the library is still technically "in use" 
-        // by the OS for a few milliseconds, but it helps keep the temp folder clean.
         let _ = fs::remove_file(&self.plugin_path);
     }
 }
