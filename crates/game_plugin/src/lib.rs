@@ -2,6 +2,7 @@
 mod systems; 
 
 use engine_shared::{GameLogic, InputState, HostInterface, ActionId, ACTION_NOT_FOUND};
+use engine_shared::{ENGINE_API_VERSION};
 use engine_ecs::World;
 
 pub struct MyGame {
@@ -42,4 +43,9 @@ impl GameLogic for MyGame {
 pub extern "C" fn _create_game() -> *mut dyn GameLogic {
     let g: Box<dyn GameLogic> = Box::new(MyGame::default());
     Box::into_raw(g)
+}
+
+#[no_mangle]
+pub extern "C" fn get_api_version() -> u32 {
+    ENGINE_API_VERSION
 }

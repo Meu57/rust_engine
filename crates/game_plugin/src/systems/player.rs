@@ -5,7 +5,7 @@ use glam::Vec2;
 pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[ActionId; 4]) {
     let [up, down, left, right] = *actions;
     let mut velocity = Vec2::ZERO;
-    let speed = 400.0;
+    let speed = 1.0;
 
     if input.is_active(up) { velocity.y += 1.0; }
     if input.is_active(down) { velocity.y -= 1.0; }

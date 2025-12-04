@@ -1,6 +1,7 @@
 // crates/engine_shared/src/lib.rs
 #![allow(dead_code)]
 
+pub const ENGINE_API_VERSION: u32 = 1;
 // Logic Modules
 pub mod components;
 pub mod input_types; // <--- The new name
