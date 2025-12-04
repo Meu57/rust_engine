@@ -3,6 +3,7 @@
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use std::ffi::c_void;
 
 use glam::Vec2;
 use winit::{
@@ -15,7 +16,7 @@ use winit::{
 use crate::hot_reload;
 use crate::renderer::Renderer;
 use crate::input::{self, ActionRegistry, Arbiter, InputMap};
-use crate::inspector; 
+use crate::inspector;
 use notify::{Watcher, RecommendedWatcher, RecursiveMode, Config};
 use crossbeam_channel::{unbounded, Receiver};
 
@@ -24,6 +25,30 @@ use engine_shared::{
     ActionSignal, MovementSignal,
 };
 use engine_ecs::World;
+
+/// Host-side spawn function exposed to plugins via HostInterface.vtable
+/// Safety: `world_ptr` must be a valid pointer to the host's World (opaque to plugin)
+extern "C" fn host_spawn_enemy(world_ptr: *mut c_void, x: f32, y: f32) {
+    if world_ptr.is_null() {
+        eprintln!("host_spawn_enemy called with null world_ptr");
+        return;
+    }
+
+    unsafe {
+        // Cast the void pointer back to a real World reference
+        let world = &mut *(world_ptr as *mut World);
+
+        // Now WE (the Host) do the allocation. Safe!
+        let enemy = world.spawn();
+        world.add_component(enemy, CTransform {
+            pos: Vec2::new(x, y),
+            scale: Vec2::splat(0.8),
+            rotation: 0.0,
+        });
+        world.add_component(enemy, CEnemy { speed: 100.0 });
+        world.add_component(enemy, CSprite { color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0) });
+    }
+}
 
 pub struct App {
     registry: ActionRegistry,
@@ -34,7 +59,6 @@ pub struct App {
     egui_ctx: egui::Context,
     egui_winit: Option<egui_winit::State>,
     show_inspector: bool,
-    
 }
 
 impl App {
@@ -66,7 +90,6 @@ impl App {
             egui_ctx: egui::Context::default(),
             egui_winit: None,
             show_inspector: true,
-           
         }
     }
 
@@ -113,9 +136,11 @@ impl App {
         let mut game_plugin =
             unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
 
+        // Build HostInterface V-table (now includes spawn_enemy)
         let host_interface = HostInterface {
             get_action_id: input::host_get_action_id,
             log: None,
+            spawn_enemy: host_spawn_enemy, // register the host spawn function
         };
 
         // Initial negotiation with plugin
@@ -177,9 +202,6 @@ impl App {
                                             }
                                         }
                                     }
-                                } else {
-                                    // Optionally print a small message (quiet by default)
-                                    // println!("⏳ Reload debounced");
                                 }
                             }
                         }
@@ -329,6 +351,7 @@ impl App {
                     }
 
                     // Send resolved state to plugin
+                    // Note: plugin should not mutate the World directly; it should request actions via HostInterface.
                     game_plugin.api.update(&mut world, &compat_state, dt);
 
                     // Request redraw after update
