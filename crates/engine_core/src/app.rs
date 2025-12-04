@@ -15,7 +15,9 @@ use winit::{
 use crate::hot_reload;
 use crate::renderer::Renderer;
 use crate::input::{self, ActionRegistry, Arbiter, InputMap};
-use crate::inspector; // inspector UI module
+use crate::inspector; 
+use notify::{Watcher, RecommendedWatcher, RecursiveMode, Config};
+use crossbeam_channel::{unbounded, Receiver};
 
 use engine_shared::{
     CEnemy, CPlayer, CSprite, CTransform, HostInterface, PriorityLayer,
@@ -32,6 +34,7 @@ pub struct App {
     egui_ctx: egui::Context,
     egui_winit: Option<egui_winit::State>,
     show_inspector: bool,
+    
 }
 
 impl App {
@@ -63,6 +66,7 @@ impl App {
             egui_ctx: egui::Context::default(),
             egui_winit: None,
             show_inspector: true,
+           
         }
     }
 

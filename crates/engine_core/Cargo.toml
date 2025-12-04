@@ -31,3 +31,6 @@ libloading = "0.8" # Standard crate for dynamic library loading
 egui = "0.27"
 egui-winit = "0.27"
 egui-wgpu = "0.27"
+# --- NEW DEPENDENCIES FOR HOT RELOAD ---
+notify = "6"
+crossbeam-channel = "0.5"
