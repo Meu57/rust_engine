@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use glam::Vec2;
 use winit::{
@@ -101,7 +102,10 @@ impl App {
         world.add_component(player, CPlayer);
         world.add_component(player, CSprite::default());
 
-        let plugin_path = "target/debug/game_plugin.dll";
+        // Plugin path (string literal so it's 'static within closure)
+        let plugin_path: &'static str = "target/debug/game_plugin.dll";
+
+        // Initial load (fail here so developer notices early problems)
         let mut game_plugin =
             unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
 
@@ -110,11 +114,15 @@ impl App {
             log: None,
         };
 
+        // Initial negotiation with plugin
         game_plugin.api.on_load(&mut world, &host_interface);
 
-        // Track held logical keys (KeyCode). If you want to track physical keys separately,
-        // you can push PhysicalKey values into a second list.
+        // Track held logical keys (KeyCode).
         let mut active_keys: Vec<KeyCode> = Vec::new();
+
+        // Small debounce so holding F5 doesn't spam reload attempts
+        let mut last_reload: Option<Instant> = None;
+        let reload_debounce = Duration::from_millis(500);
 
         event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Poll);
@@ -135,6 +143,40 @@ impl App {
                         if key_event.state == ElementState::Pressed {
                             if let PhysicalKey::Code(KeyCode::F1) = key_event.physical_key {
                                 self.show_inspector = !self.show_inspector;
+                            }
+                        }
+
+                        // HOT-RELOAD TRIGGER: F5, debounced
+                        if key_event.state == ElementState::Pressed {
+                            if let PhysicalKey::Code(KeyCode::F5) = key_event.physical_key {
+                                let now = Instant::now();
+                                let allowed = last_reload
+                                    .map(|t| now.duration_since(t) >= reload_debounce)
+                                    .unwrap_or(true);
+
+                                if allowed {
+                                    last_reload = Some(now);
+                                    println!("🔄 Hot Reload requested (F5)...");
+                                    unsafe {
+                                        match hot_reload::GamePlugin::load(plugin_path) {
+                                            Ok(mut new_plugin) => {
+                                                // Call on_load on the new plugin so it can renegotiate IDs.
+                                                new_plugin.api.on_load(&mut world, &host_interface);
+
+                                                // Swap: dropping old plugin will unload old lib.
+                                                game_plugin = new_plugin;
+                                                println!("✅ Hot Reload Success! Plugin replaced.");
+                                            }
+                                            Err(e) => {
+                                                eprintln!("❌ Hot Reload Failed: {}", e);
+                                                eprintln!("Continuing with currently loaded plugin.");
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Optionally print a small message (quiet by default)
+                                    // println!("⏳ Reload debounced");
+                                }
                             }
                         }
 
@@ -162,13 +204,13 @@ impl App {
                         let raw_input = self.egui_winit.as_mut().unwrap().take_egui_input(&window);
                         self.egui_ctx.begin_frame(raw_input);
 
-                        // Inspector
+                        // Inspector UI
                         inspector::show(&self.egui_ctx, &self.arbiter, &mut self.show_inspector);
 
                         // --- GUI FRAME END ---
                         let gui_output = self.egui_ctx.end_frame();
 
-                        // Tessellate with the exact pixels_per_point that egui used.
+                        // tessellate using the actual pixels_per_point used by egui
                         let primitives = self.egui_ctx.tessellate(
                             gui_output.shapes,
                             gui_output.pixels_per_point,
@@ -180,7 +222,7 @@ impl App {
                             .unwrap()
                             .handle_platform_output(&window, gui_output.platform_output);
 
-                        // Note: renderer.render signature expects screen/egui data.
+                        // Render: pass egui primitives & textures to renderer (renderer must accept this signature)
                         let _ = renderer.render(&world, Some((&self.egui_ctx, &primitives, &textures_delta)));
                     }
 
@@ -198,12 +240,10 @@ impl App {
                     let mut player_active = false;
 
                     for &key in &active_keys {
-                        // Create a PhysicalKey for intent resolution.
-                        // NOTE: this uses a PhysicalKey::Code fallback; ideally you'd maintain physical keys separately.
+                        // Create a PhysicalKey for intent resolution (fallback).
                         let physical = PhysicalKey::Code(key);
 
-                        // Resolve intent using either logical or physical mapping.
-                        // The InputMap API is expected to handle Option<KeyCode> + PhysicalKey.
+                        // Resolve intent using logical+physical mapping.
                         if let Some(action_id) = self.input_map.map_signal_to_intent(Some(key), physical) {
                             self.arbiter.add_action(ActionSignal {
                                 layer: PriorityLayer::Control,
