@@ -24,11 +24,11 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
         direction.x -= 1.0;
     }
     if input.is_active(right) {
-        direction.x += 1.0;
+        direction.x += 1000.0;
     }
 
     // Movement magnitude (tweakable)
-    let speed = 1000.0;
+    let speed = 10.0;
 
     // Normalize direction, then apply magnitude and delta-time
     let velocity = if direction.length_squared() > 0.0 {

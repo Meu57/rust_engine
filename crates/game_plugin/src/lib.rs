@@ -68,8 +68,13 @@ extern "C" fn shim_on_load(state: *mut c_void, world: *mut c_void, host: &HostIn
     if state.is_null() || world.is_null() { return; }
     unsafe {
         let game: &mut MyGame = &mut *(state as *mut MyGame);
-        let world_any: &mut dyn std::any::Any = &mut *(world as *mut dyn std::any::Any);
-        game.do_on_load(world_any, host);
+        
+        // FIX: Cast void* -> *mut World first to recover type info
+        let world_ptr = world as *mut World;
+        // Deref to &mut World. Rust will then coerce this to &mut dyn Any automatically.
+        let world_ref = &mut *world_ptr;
+        
+        game.do_on_load(world_ref, host);
     }
 }
 
@@ -77,8 +82,12 @@ extern "C" fn shim_update(state: *mut c_void, world: *mut c_void, input: &InputS
     if state.is_null() || world.is_null() { return; }
     unsafe {
         let game: &mut MyGame = &mut *(state as *mut MyGame);
-        let world_any: &mut dyn std::any::Any = &mut *(world as *mut dyn std::any::Any);
-        game.do_update(world_any, input, dt);
+        
+        // FIX: Cast void* -> *mut World first to recover type info
+        let world_ptr = world as *mut World;
+        let world_ref = &mut *world_ptr;
+        
+        game.do_update(world_ref, input, dt);
     }
 }
 
