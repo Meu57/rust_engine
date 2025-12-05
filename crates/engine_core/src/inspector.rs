@@ -1,52 +1,74 @@
-// crates/engine_core/src/inspector.rs
-use egui;
-use engine_shared::PriorityLayer;
+use egui::{Color32, Context, Ui};
+use engine_shared::{PriorityLayer, ActionSignal, MovementSignal};
 use crate::input::Arbiter;
 
-pub fn show(ctx: &egui::Context, arbiter: &Arbiter, open: &mut bool) {
-    if !*open {
-        return;
-    }
-
+pub fn show(ctx: &Context, arbiter: &Arbiter, open: &mut bool) {
     egui::Window::new("Input Inspector")
-        .default_pos([10.0, 10.0])
+        .open(open)
         .show(ctx, |ui| {
-            ui.heading("Arbitration Stack");
+            ui.heading("Arbiter State");
             ui.separator();
 
-            let layers = [
-                (PriorityLayer::Reflex, "Layer 0: Reflex (Physics)", egui::Color32::RED),
-                (PriorityLayer::Cutscene, "Layer 1: Cutscene", egui::Color32::YELLOW),
-                (PriorityLayer::Control, "Layer 2: Player Control", egui::Color32::GREEN),
-                (PriorityLayer::Ambient, "Layer 3: Ambient", egui::Color32::GRAY),
-            ];
-
-            let mut winning_move = PriorityLayer::Ambient;
-            for &(layer, _, _) in &layers {
+            // 1. ANALYZE MOVEMENT (Still Winner-Takes-All)
+            let mut move_winner = PriorityLayer::Ambient;
+            for &layer in &[PriorityLayer::Reflex, PriorityLayer::Cutscene, PriorityLayer::Control] {
                 if arbiter.move_signals.iter().any(|s| s.layer == layer) {
-                    winning_move = layer;
+                    move_winner = layer;
                     break;
                 }
             }
 
-            for (layer, label, color) in layers {
-                let is_active = arbiter.move_signals.iter().any(|s| s.layer == layer);
-                let is_winner = layer == winning_move && is_active;
+            ui.label(format!("Movement Winner: {:?}", move_winner));
+            
+            // Visualize Movement Signals
+            ui.collapsing("Movement Signals", |ui| {
+                for signal in &arbiter.move_signals {
+                    let is_winner = signal.layer == move_winner;
+                    let color = if is_winner { Color32::GREEN } else { Color32::GRAY };
+                    
+                    ui.colored_label(color, format!(
+                        "[{:?}] {:?} (w: {:.1}) -> {}", 
+                        signal.layer, 
+                        signal.vector, 
+                        signal.weight,
+                        if is_winner { "ACTIVE" } else { "SUPPRESSED" }
+                    ));
+                }
+            });
 
-                if is_winner {
-                    ui.colored_label(color, format!("▶ {} [WINNER]", label));
-                    for s in arbiter.move_signals.iter().filter(|s| s.layer == layer) {
-                        ui.label(format!("   Vector: {:.2}, Weight: {:.2}", s.vector, s.weight));
-                    }
-                } else if is_active {
-                    ui.colored_label(color.linear_multiply(0.5), format!("▷ {} [SUPPRESSED]", label));
+            ui.separator();
+
+            // 2. ANALYZE ACTIONS (Now Cumulative!)
+            ui.label("Action Contributors:");
+
+            // We iterate layers to see which ones are actually contributing to the mask
+            let layers = [PriorityLayer::Reflex, PriorityLayer::Cutscene, PriorityLayer::Control];
+            for layer in layers {
+                // Check if this layer has any active signals
+                let has_active = arbiter.action_signals.iter().any(|s| s.layer == layer && s.active);
+                
+                if has_active {
+                    // Draw it in Green to show it is contributing
+                    ui.colored_label(Color32::GREEN, format!("  • {:?}", layer));
                 } else {
-                    ui.label(format!("  {}", label));
+                    // Draw faint text to show it's idle
+                    ui.colored_label(Color32::from_gray(100), format!("  • {:?} (Idle)", layer));
                 }
             }
 
-            ui.separator();
-            ui.label("Press 'P' to simulate Reflex Layer override.");
-            ui.colored_label(egui::Color32::LIGHT_GRAY, "Press 'F1' to hide this window.");
+            ui.collapsing("Action Signals (Raw)", |ui| {
+                for signal in &arbiter.action_signals {
+                    // In the new system, ANY active signal from a valid layer contributes.
+                    // So if it's active, it's green.
+                    let color = if signal.active { Color32::GREEN } else { Color32::RED };
+                    
+                    ui.colored_label(color, format!(
+                        "[{:?}] ID: {} = {}", 
+                        signal.layer, 
+                        signal.action_id, 
+                        signal.active
+                    ));
+                }
+            });
         });
 }

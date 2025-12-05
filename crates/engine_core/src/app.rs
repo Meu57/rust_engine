@@ -63,6 +63,7 @@ impl App {
         let mut input_map = InputMap::default();
 
         // Register canonical actions
+        // NOTE: In a real engine, these would likely be loaded from a config file.
         let move_up = registry.register("MoveUp");
         let move_down = registry.register("MoveDown");
         let move_left = registry.register("MoveLeft");
@@ -249,8 +250,9 @@ impl App {
 
                     self.arbiter.clear();
 
-                    let mut player_move = Vec2::ZERO;
-                    let mut player_active = false;
+                    // [CLEANUP] Removed manual player_move calculation.
+                    // The Engine now simply reports which Actions are active.
+                    // Interpretation is left entirely to the Game Plugin.
 
                     for &key in &active_keys {
                         let physical = PhysicalKey::Code(key);
@@ -260,27 +262,10 @@ impl App {
                                 action_id,
                                 active: true,
                             });
-
-                            let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
-                            let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
-                            let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
-                            let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
-
-                            if action_id == id_up { player_move.y += 1.0; player_active = true; }
-                            if action_id == id_down { player_move.y -= 1.0; player_active = true; }
-                            if action_id == id_left { player_move.x -= 1.0; player_active = true; }
-                            if action_id == id_right { player_move.x += 1.0; player_active = true; }
                         }
                     }
 
-                    if player_active {
-                        self.arbiter.add_movement(MovementSignal {
-                            layer: PriorityLayer::Control,
-                            vector: player_move,
-                            weight: 1.0,
-                        });
-                    }
-
+                    // Debug: Keep Reflex layer override for testing priorities (optional)
                     if active_keys.contains(&KeyCode::KeyP) {
                         self.arbiter.add_movement(MovementSignal {
                             layer: PriorityLayer::Reflex,
@@ -295,8 +280,6 @@ impl App {
                     }
 
                     let final_input_state = self.arbiter.resolve();
-
-                    
 
                     // Send resolved state to plugin via VTable
                     unsafe {
