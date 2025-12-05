@@ -26,7 +26,7 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
     }
 
     // Movement magnitude (tweakable)
-    let speed = 1500.0; // Increased speed slightly to be visible since we removed the 1000x multiplier
+    let speed = 600.0; // Increased speed slightly to be visible since we removed the 1000x multiplier
 
     // Normalize direction, then apply magnitude and delta-time
     let velocity = if direction.length_squared() > 0.0 {
