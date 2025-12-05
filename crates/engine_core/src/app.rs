@@ -296,26 +296,14 @@ impl App {
 
                     let final_input_state = self.arbiter.resolve();
 
-                    // Compatibility mapping
-                    let mut compat_state = final_input_state;
-                    let vy = compat_state.analog_axes[1];
-                    let vx = compat_state.analog_axes[0];
-                    let id_up = self.registry.get_id("MoveUp").unwrap_or(u32::MAX);
-                    let id_down = self.registry.get_id("MoveDown").unwrap_or(u32::MAX);
-                    let id_left = self.registry.get_id("MoveLeft").unwrap_or(u32::MAX);
-                    let id_right = self.registry.get_id("MoveRight").unwrap_or(u32::MAX);
-
-                    if vy > 0.1 { compat_state.digital_mask |= 1 << id_up; }
-                    if vy < -0.1 { compat_state.digital_mask |= 1 << id_down; }
-                    if vx < -0.1 { compat_state.digital_mask |= 1 << id_left; }
-                    if vx > 0.1 { compat_state.digital_mask |= 1 << id_right; }
+                    
 
                     // Send resolved state to plugin via VTable
                     unsafe {
                         (game_plugin.api.update)(
                             game_plugin.api.state,
                             &mut world as *mut _ as *mut c_void,
-                            &compat_state,
+                            &final_input_state,
                             dt
                         );
                     }

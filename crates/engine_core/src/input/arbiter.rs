@@ -28,7 +28,8 @@ impl Arbiter {
     pub fn resolve(&self) -> InputState {
         let mut state = InputState::default();
 
-        // A. Resolve Movement
+        // A. Resolve Movement (Winner Takes All)
+        // We keep this behavior: Only ONE layer should drive the character's velocity at a time.
         let mut winning_move_layer = PriorityLayer::Ambient;
         for &layer in &[
             PriorityLayer::Reflex,
@@ -56,24 +57,20 @@ impl Arbiter {
         state.analog_axes[0] = final_vector.x;
         state.analog_axes[1] = final_vector.y;
 
-        // B. Resolve Actions (Digital)
-        let mut winning_action_layer = PriorityLayer::Ambient;
+        // B. Resolve Actions (Digital) - FIX: Priority Cumulative
+        // Instead of picking one "winning layer" for all buttons, we let high-priority layers
+        // press buttons, and then allow lower layers to press buttons that aren't blocked.
+        // This ensures a "Reflex" action (like Pause) works even if "Control" (Movement) is active.
         for &layer in &[
             PriorityLayer::Reflex,
             PriorityLayer::Cutscene,
             PriorityLayer::Control,
         ] {
-            let has_signal = self.action_signals.iter().any(|s| s.layer == layer);
-            if has_signal {
-                winning_action_layer = layer;
-                break;
-            }
-        }
-
-        for s in &self.action_signals {
-            if s.layer == winning_action_layer && s.active {
-                if (s.action_id as usize) < 64 {
-                    state.digital_mask |= 1u64 << s.action_id;
+            for s in &self.action_signals {
+                if s.layer == layer && s.active {
+                    if (s.action_id as usize) < 64 {
+                        state.digital_mask |= 1u64 << s.action_id;
+                    }
                 }
             }
         }

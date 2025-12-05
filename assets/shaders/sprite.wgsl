@@ -5,13 +5,19 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
 };
 
-// Data sent from the CPU (Our ECS Components)
+// Camera uniform (group 0 binding 0)
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(0)
+var<uniform> camera: CameraUniform;
+
 struct InstanceInput {
-    @location(0) model_matrix_0: vec4<f32>, // Transform Matrix Col 0
-    @location(1) model_matrix_1: vec4<f32>, // Transform Matrix Col 1
-    @location(2) model_matrix_2: vec4<f32>, // Transform Matrix Col 2
-    @location(3) model_matrix_3: vec4<f32>, // Transform Matrix Col 3
-    @location(4) color: vec4<f32>,          // Sprite Color
+    @location(0) model_matrix_0: vec4<f32>,
+    @location(1) model_matrix_1: vec4<f32>,
+    @location(2) model_matrix_2: vec4<f32>,
+    @location(3) model_matrix_3: vec4<f32>,
+    @location(4) color: vec4<f32>,
 };
 
 @vertex
@@ -21,10 +27,7 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    // Hardcoded quad vertices (Triangle Strip)
-    // 0--2
-    // | /|
-    // 1--3
+    // Standard quad in model space centered at origin (triangle strip)
     var pos = array<vec2<f32>, 4>(
         vec2<f32>(-0.5, 0.5),  // Top Left
         vec2<f32>(-0.5, -0.5), // Bottom Left
@@ -34,7 +37,7 @@ fn vs_main(
 
     let vertex_pos = pos[in_vertex_index];
 
-    // Reconstruct the matrix from the instance columns
+    // Reconstruct model matrix from columns
     let model_matrix = mat4x4<f32>(
         instance.model_matrix_0,
         instance.model_matrix_1,
@@ -42,15 +45,10 @@ fn vs_main(
         instance.model_matrix_3,
     );
 
-    // Apply the transform (Model Space -> Clip Space)
-    // Note: We are cheating and skipping View/Projection matrices for 5 minutes.
-    // We are drawing directly in Normalized Device Coordinates (NDC).
-    // X and Y must be between -1.0 and 1.0 to be visible.
-    
-    // Divide by 500.0 to scale our "World Pixels" down to NDC for testing
-    let pixel_pos = model_matrix * vec4<f32>(vertex_pos, 0.0, 1.0);
-    
-    out.clip_position = vec4<f32>(pixel_pos.x / 500.0, pixel_pos.y / 500.0, 0.0, 1.0);
+    let world_position = model_matrix * vec4<f32>(vertex_pos, 0.0, 1.0);
+
+    // Multiply with camera view_proj to go to clip space
+    out.clip_position = camera.view_proj * world_position;
     out.color = instance.color;
 
     return out;

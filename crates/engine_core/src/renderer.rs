@@ -1,16 +1,16 @@
 // crates/engine_core/src/renderer.rs
+
 use winit::window::Window;
 use wgpu::util::DeviceExt;
 use engine_ecs::World;
 use engine_shared::{CTransform, CSprite};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 
-// --- INSTANCE STRUCT (Unchanged) ---
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
-    model: [[f32; 4]; 4], 
-    color: [f32; 4],      
+    model: [[f32; 4]; 4],
+    color: [f32; 4],
 }
 
 impl InstanceRaw {
@@ -20,14 +20,23 @@ impl InstanceRaw {
             array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
+                // model matrix (4 columns)
                 wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x4 },
                 wgpu::VertexAttribute { offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress, shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
                 wgpu::VertexAttribute { offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress, shader_location: 2, format: wgpu::VertexFormat::Float32x4 },
                 wgpu::VertexAttribute { offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
+                // color
                 wgpu::VertexAttribute { offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress, shader_location: 4, format: wgpu::VertexFormat::Float32x4 },
             ],
         }
     }
+}
+
+// Camera uniform blob
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
 }
 
 pub struct Renderer {
@@ -38,8 +47,12 @@ pub struct Renderer {
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     instance_buffer: wgpu::Buffer,
-    
-    // --- GUI SUPPORT ---
+
+    // Camera
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+
+    // GUI support
     pub gui_renderer: egui_wgpu::Renderer,
 }
 
@@ -47,12 +60,12 @@ impl Renderer {
     pub async fn new(window: &Window) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY, 
+            backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
 
-        let surface = unsafe { 
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap()) 
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap())
         }.unwrap();
 
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -89,10 +102,43 @@ impl Renderer {
 
         surface.configure(&device, &config);
 
+        // Camera buffer and bind group
+        let camera_uniform = CameraUniform { view_proj: Mat4::IDENTITY.to_cols_array_2d() };
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("camera_bind_group_layout"),
+        });
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("camera_bind_group"),
+        });
+
+        // Shader and pipeline layout (attach camera bind group layout)
         let shader = device.create_shader_module(wgpu::include_wgsl!("../../../assets/shaders/sprite.wgsl"));
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&camera_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -144,6 +190,8 @@ impl Renderer {
             size,
             render_pipeline,
             instance_buffer,
+            camera_buffer,
+            camera_bind_group,
             gui_renderer,
         }
     }
@@ -158,12 +206,19 @@ impl Renderer {
     }
 
     pub fn render(
-        &mut self, 
-        world: &World, 
+        &mut self,
+        world: &World,
         gui_ctx: Option<(&egui::Context, &Vec<egui::ClippedPrimitive>, &egui::TexturesDelta)>
     ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Update camera (orthographic)
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let projection = Mat4::orthographic_rh(0.0, width, 0.0, height, -1.0, 1.0);
+        let camera_data = CameraUniform { view_proj: projection.to_cols_array_2d() };
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_data]));
 
         // 1. EXTRACT GAME DATA
         let mut instances = Vec::new();
@@ -171,9 +226,9 @@ impl Renderer {
             for (entity, transform) in transforms.iter() {
                 if let Some(sprite) = sprites.get(*entity) {
                     let model = Mat4::from_scale_rotation_translation(
-                        glam::Vec3::new(transform.scale.x * 50.0, transform.scale.y * 50.0, 1.0),
+                        Vec3::new(transform.scale.x * 50.0, transform.scale.y * 50.0, 1.0),
                         glam::Quat::from_rotation_z(transform.rotation),
-                        glam::Vec3::new(transform.pos.x, transform.pos.y, 0.0),
+                        Vec3::new(transform.pos.x, transform.pos.y, 0.0),
                     );
                     instances.push(InstanceRaw {
                         model: model.to_cols_array_2d(),
@@ -183,11 +238,9 @@ impl Renderer {
             }
         }
 
-        // [FIX] Dynamic Buffer Resizing
-        // Check if the current buffer is large enough for the new data.
+        // Dynamic buffer resizing / update
         let instance_bytes = bytemuck::cast_slice(&instances);
         if (instance_bytes.len() as wgpu::BufferAddress) > self.instance_buffer.size() {
-            // Buffer is too small; destroy it and create a larger one.
             self.instance_buffer.destroy();
             self.instance_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Instance Buffer"),
@@ -195,7 +248,6 @@ impl Renderer {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
         } else {
-            // Buffer is large enough; just update it.
             self.queue.write_buffer(&self.instance_buffer, 0, instance_bytes);
         }
 
@@ -221,6 +273,7 @@ impl Renderer {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]); // set camera
             render_pass.set_vertex_buffer(0, self.instance_buffer.slice(0..((instances.len() * std::mem::size_of::<InstanceRaw>()) as u64)));
             render_pass.draw(0..4, 0..instances.len() as u32);
         }
@@ -236,12 +289,12 @@ impl Renderer {
 
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
-                pixels_per_point: ctx.pixels_per_point(), 
+                pixels_per_point: ctx.pixels_per_point(),
             };
 
             let mut command_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Gui Encoder") });
             self.gui_renderer.update_buffers(&self.device, &self.queue, &mut command_encoder, primitives, &screen_descriptor);
-            
+
             {
                 let mut gui_pass = command_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Gui Render Pass"),
@@ -249,7 +302,7 @@ impl Renderer {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load, 
+                            load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -259,11 +312,11 @@ impl Renderer {
                 });
                 self.gui_renderer.render(&mut gui_pass, primitives, &screen_descriptor);
             }
-            
+
             for id in &delta.free {
                 self.gui_renderer.free_texture(id);
             }
-            
+
             self.queue.submit(std::iter::once(command_encoder.finish()));
         }
 

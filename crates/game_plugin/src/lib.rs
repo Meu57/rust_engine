@@ -27,28 +27,21 @@ impl Default for MyGame {
 }
 
 impl MyGame {
-    // Logic split into "do_" functions to keep FFI shims clean
-    fn do_on_load(&mut self, _world_any: &mut dyn std::any::Any, host: &HostInterface) {
-        // Resolve action ids via host
-        self.actions[0] = (host.get_action_id)(b"MoveUp".as_ptr(), 6);
-        self.actions[1] = (host.get_action_id)(b"MoveDown".as_ptr(), 8);
-        self.actions[2] = (host.get_action_id)(b"MoveLeft".as_ptr(), 8);
-        self.actions[3] = (host.get_action_id)(b"MoveRight".as_ptr(), 9);
+    // Accept &mut World directly (host guarantees the pointer is a World)
+    fn do_on_load(&mut self, world: &mut World, host: &HostInterface) {
+        // Resolve action ids via host (slice-style names)
+        self.actions[0] = (host.get_action_id)(b"MoveUp".as_ptr(), b"MoveUp".len());
+        self.actions[1] = (host.get_action_id)(b"MoveDown".as_ptr(), b"MoveDown".len());
+        self.actions[2] = (host.get_action_id)(b"MoveLeft".as_ptr(), b"MoveLeft".len());
+        self.actions[3] = (host.get_action_id)(b"MoveRight".as_ptr(), b"MoveRight".len());
 
-        // Capture the host-provided spawn function
+        // Capture host-provided spawn function (if present)
+        // Note: if HostInterface.spawn_enemy is Option<...>, handle accordingly.
         self.spawn_fn = Some(host.spawn_enemy);
     }
 
-    fn do_update(&mut self, world_any: &mut dyn std::any::Any, input: &InputState, dt: f32) {
-        // DOWNCAST ONLY FOR READ/QUERY (plugin should not perform host allocations directly)
-        let world = match world_any.downcast_mut::<World>() {
-            Some(w) => w,
-            None => {
-                eprintln!("Plugin Error: Failed to downcast World.");
-                return; 
-            }, 
-        };
-
+    // Now takes &mut World instead of dyn Any
+    fn do_update(&mut self, world: &mut World, input: &InputState, dt: f32) {
         // Update player logic (reads input, writes via safe queries)
         systems::player::update_player(world, input, dt, &self.actions);
 
@@ -63,17 +56,15 @@ impl MyGame {
 // -------------------------
 // FFI Shim Functions
 // -------------------------
-
 extern "C" fn shim_on_load(state: *mut c_void, world: *mut c_void, host: &HostInterface) {
     if state.is_null() || world.is_null() { return; }
     unsafe {
         let game: &mut MyGame = &mut *(state as *mut MyGame);
-        
-        // FIX: Cast void* -> *mut World first to recover type info
+
+        // Cast void* -> *mut World, then deref to &mut World
         let world_ptr = world as *mut World;
-        // Deref to &mut World. Rust will then coerce this to &mut dyn Any automatically.
         let world_ref = &mut *world_ptr;
-        
+
         game.do_on_load(world_ref, host);
     }
 }
@@ -82,11 +73,11 @@ extern "C" fn shim_update(state: *mut c_void, world: *mut c_void, input: &InputS
     if state.is_null() || world.is_null() { return; }
     unsafe {
         let game: &mut MyGame = &mut *(state as *mut MyGame);
-        
-        // FIX: Cast void* -> *mut World first to recover type info
+
+        // Cast void* -> *mut World, then deref to &mut World
         let world_ptr = world as *mut World;
         let world_ref = &mut *world_ptr;
-        
+
         game.do_update(world_ref, input, dt);
     }
 }
@@ -98,16 +89,15 @@ extern "C" fn shim_on_unload(_state: *mut c_void, _world: *mut c_void) {
 extern "C" fn shim_drop(state: *mut c_void) {
     if state.is_null() { return; }
     unsafe {
-        // Box::from_raw to free plugin-owned heap memory safely inside the plugin.
+        // Free plugin-owned heap memory safely inside the plugin.
         let _boxed: Box<MyGame> = Box::from_raw(state as *mut MyGame);
-        // _boxed is dropped here, freeing memory
+        // dropped here
     }
 }
 
 // -------------------------
 // Exports
 // -------------------------
-
 #[no_mangle]
 pub extern "C" fn _create_game() -> PluginApi {
     let boxed = Box::new(MyGame::default());
