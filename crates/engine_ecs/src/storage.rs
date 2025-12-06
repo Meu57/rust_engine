@@ -1,4 +1,5 @@
 use crate::Entity;
+use rayon::prelude::*;
 
 // The trait allows us to treat different component storages generically
 pub trait Storage {
@@ -86,6 +87,20 @@ impl<T: 'static> SparseSet<T> {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Entity, &mut T)> {
         self.entities.iter().zip(self.dense.iter_mut())
+    }
+}
+
+// Parallel iteration support using Rayon
+impl<T: 'static + Sync + Send> SparseSet<T> {
+    /// Parallel read-only iterator over (&Entity, &T)
+    pub fn par_iter(&self) -> impl ParallelIterator<Item = (&Entity, &T)> {
+        self.entities.par_iter().zip(self.dense.par_iter())
+    }
+
+    /// Parallel mutable iterator over (&Entity, &mut T)
+    /// Safe because dense indices are unique per entity.
+    pub fn par_iter_mut(&mut self) -> impl ParallelIterator<Item = (&Entity, &mut T)> {
+        self.entities.par_iter().zip(self.dense.par_iter_mut())
     }
 }
 

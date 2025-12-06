@@ -304,17 +304,16 @@ impl Renderer {
 
         // --- OPTIMIZED INSTANCE UPLOAD ---
 
-        // A. Resize logic: Only recreate when strictly necessary, with growth
+        // Exponential Growth Strategy:
+        // resize rarely, allocate 2x requested size, and align to 4 bytes.
         if required_size > self.instance_buffer.size() {
+            let old_size = self.instance_buffer.size().max(256);
             self.instance_buffer.destroy();
 
-            // Allocate 2x what we need to avoid frequent resizes
-            let new_size = (required_size * 2).max(self.instance_buffer.size());
-            let new_size = if new_size == 0 {
-                256 // some minimal non-zero size
-            } else {
-                new_size
-            };
+            let mut new_size = (required_size * 2).max(old_size);
+            new_size = wgpu::util::align_to(new_size, 4);
+
+            println!("Allocating new Instance Buffer: {} bytes", new_size);
 
             self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Instance Buffer"),

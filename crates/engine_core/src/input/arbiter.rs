@@ -1,13 +1,9 @@
-// crates/engine_core/src/input/arbiter.rs
 use glam::Vec2;
 use engine_shared::{
     ActionSignal, InputState, MovementSignal, PriorityLayer,
 };
 
 // Define Action Bitflags (Masks)
-// These map to specific bits in the InputState.digital_mask
-// Ensure these match your Action IDs (0 = Up, 1 = Down, etc.) or are generic categories.
-// For the Arbiter, we often group them by INTENT.
 pub mod channels {
     pub const MOVE: u64   = 0b0000_1111; // IDs 0,1,2,3 (Up, Down, Left, Right)
     pub const LOOK: u64   = 0b0000_0000; // Reserved
@@ -16,10 +12,19 @@ pub mod channels {
     pub const ALL: u64    = u64::MAX;
 }
 
+/// Per-layer persistent state for temporal locking.
+/// Instead of using real time, we count in frames.
+#[derive(Default)]
+pub struct LayerState {
+    pub lock_frames_remaining: u32,
+    pub persistent_mask: u64,
+}
+
 #[derive(Default)]
 pub struct Arbiter {
     pub move_signals: Vec<MovementSignal>,
     pub action_signals: Vec<ActionSignal>,
+    pub layer_states: [LayerState; 4], // Reflex, Cutscene, Control, Ambient
 }
 
 impl Arbiter {
@@ -36,16 +41,18 @@ impl Arbiter {
         self.action_signals.push(signal);
     }
 
-    pub fn resolve(&self) -> InputState {
+    /// Resolve the final InputState for this frame.
+    /// Uses per-frame temporal locking: certain layers (e.g. Reflex)
+    /// can keep their suppression active for a few frames even after
+    /// the original signal is gone.
+    pub fn resolve(&mut self) -> InputState {
         let mut state = InputState::default();
 
         // ---------------------------------------------------------
         // 1. Resolve Movement (Winner Takes All)
         // ---------------------------------------------------------
-        // We keep this behavior: Only ONE layer should drive the character's velocity.
         let mut winning_move_layer = PriorityLayer::Ambient;
-        
-        // Find the highest priority layer that is actually requesting movement
+
         for &layer in &[
             PriorityLayer::Reflex,
             PriorityLayer::Cutscene,
@@ -65,7 +72,6 @@ impl Arbiter {
             }
         }
 
-        // Normalize to prevent "1000.0" speed bugs if multiple signals add up
         if final_vector.length_squared() > 1.0 {
             final_vector = final_vector.normalize();
         }
@@ -74,20 +80,19 @@ impl Arbiter {
         state.analog_axes[1] = final_vector.y;
 
         // ---------------------------------------------------------
-        // 2. Resolve Actions (Cumulative Priority Stack)
+        // 2. Resolve Actions (Layers + Temporal Locking)
         // ---------------------------------------------------------
-        // Logic: Iterate Top -> Bottom.
-        // Maintain a 'suppressed_mask'. Higher layers add to this mask to block lower layers.
-        
         let mut global_suppression_mask: u64 = 0;
 
-        for &layer in &[
+        let layers = [
             PriorityLayer::Reflex,
             PriorityLayer::Cutscene,
             PriorityLayer::Control,
-            // Ambient is usually implicit/lowest, handled by default state
-        ] {
-            // A. Build the Request Mask for THIS layer
+            PriorityLayer::Ambient,
+        ];
+
+        for (idx, &layer) in layers.iter().enumerate() {
+            // A. Build request mask for this layer from current signals
             let mut layer_request_mask: u64 = 0;
             for s in &self.action_signals {
                 if s.layer == layer && s.active {
@@ -97,34 +102,50 @@ impl Arbiter {
                 }
             }
 
-            // B. Apply Suppression from Higher Layers
-            // We only allow bits that have NOT been suppressed yet.
-            let allowed_actions = layer_request_mask & !global_suppression_mask;
-            
-            // Add allowed actions to final state
-            state.digital_mask |= allowed_actions;
+            // --- TEMPORAL LOCKING: reuse previous suppression if still locked ---
+            let layer_state = &mut self.layer_states[idx];
 
-            // C. Determine what THIS layer wants to suppress for layers below it.
-            // NOTE: Ideally, 'ActionSignal' would carry suppression info.
-            // For now, we define architectural rules here (The "Policy"):
+            if layer_state.lock_frames_remaining > 0 {
+                layer_request_mask |= layer_state.persistent_mask;
+                layer_state.lock_frames_remaining -= 1;
+            }
+
+            // B. Decide this layer's suppression policy
             let layer_suppression = match layer {
-                // If Reflex is active (e.g. Damage), it suppresses Movement but allows Pause
-                PriorityLayer::Reflex => if layer_request_mask != 0 { 
-                    channels::MOVE | channels::ACTION 
-                } else { 0 },
-                
-                // Cutscenes suppress Movement and Action, but allow System (Pause)
-                PriorityLayer::Cutscene => if layer_request_mask != 0 {
-                    channels::MOVE | channels::ACTION
-                } else { 0 },
-
-                // Control layer generally doesn't suppress Ambient, but it could.
-                PriorityLayer::Control => 0, 
-                
+                // Reflex suppresses movement + actions while active/locked
+                PriorityLayer::Reflex => {
+                    if layer_request_mask != 0 {
+                        channels::MOVE | channels::ACTION
+                    } else {
+                        0
+                    }
+                }
+                // Cutscenes suppress movement and actions
+                PriorityLayer::Cutscene => {
+                    if layer_request_mask != 0 {
+                        channels::MOVE | channels::ACTION
+                    } else {
+                        0
+                    }
+                }
+                // Control normally doesn't suppress others
+                PriorityLayer::Control => 0,
                 _ => 0,
             };
 
-            // Add this layer's suppression to the global mask for the next iteration
+            // If Reflex just became active this frame, start a short lock window.
+            // At 60 FPS, 30 frames ~= 0.5 seconds.
+            if layer == PriorityLayer::Reflex && layer_request_mask != 0 {
+                if layer_state.lock_frames_remaining == 0 {
+                    layer_state.lock_frames_remaining = 30;
+                    layer_state.persistent_mask = layer_suppression;
+                }
+            }
+
+            // C. Apply global suppression
+            let allowed = layer_request_mask & !global_suppression_mask;
+            state.digital_mask |= allowed;
+
             global_suppression_mask |= layer_suppression;
         }
 

@@ -18,7 +18,7 @@ use crate::input::{self, ActionRegistry, Arbiter, InputMap};
 use crate::inspector;
 use engine_shared::{
     CEnemy, CPlayer, CSprite, CTransform, HostInterface, PriorityLayer,
-    ActionSignal, MovementSignal, HostContext, // <--- HostContext imported
+    ActionSignal, MovementSignal, HostContext,
 };
 use engine_ecs::World;
 
@@ -35,7 +35,6 @@ extern "C" fn host_spawn_enemy(ctx: *mut HostContext, x: f32, y: f32) {
 
     unsafe {
         // Cast HostContext back to World.
-        // This is the one place where this unsafe cast is valid and intended.
         let world = &mut *(ctx as *mut World);
 
         let enemy = world.spawn();
@@ -48,9 +47,12 @@ extern "C" fn host_spawn_enemy(ctx: *mut HostContext, x: f32, y: f32) {
             },
         );
         world.add_component(enemy, CEnemy { speed: 100.0 });
-        world.add_component(enemy, CSprite {
-            color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-        });
+        world.add_component(
+            enemy,
+            CSprite {
+                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            },
+        );
     }
 }
 
@@ -145,13 +147,22 @@ impl App {
             spawn_enemy: host_spawn_enemy,
         };
 
-        // Initial negotiation with plugin
+        // Initial negotiation with plugin (no snapshot yet).
         unsafe {
-            (game_plugin.api.on_load)(
+            let ok = (game_plugin.api.on_load)(
                 game_plugin.api.state,
-                &mut world as *mut _ as *mut HostContext, // <--- cast to HostContext
-                &host_interface,
+                &mut world as *mut _ as *mut HostContext,
+                &host_interface as *const _,
+                std::ptr::null(),
+                0,
             );
+
+            if !ok {
+                eprintln!(
+                    "Warning: initial plugin on_load() reported failure. \
+                     Continuing with plugin default state."
+                );
+            }
         }
 
         let mut active_keys: Vec<KeyCode> = Vec::new();
@@ -179,10 +190,11 @@ impl App {
                                 }
                             }
 
-                            // HOT-RELOAD TRIGGER
+                            // HOT-RELOAD TRIGGER (F5)
                             if key_event.state == ElementState::Pressed {
                                 if let PhysicalKey::Code(KeyCode::F5) = key_event.physical_key {
                                     let now = Instant::now();
+                                    // Debounce to prevent rapid reloading crashes.
                                     let allowed = last_reload
                                         .map(|t| now.duration_since(t) >= reload_debounce)
                                         .unwrap_or(true);
@@ -191,25 +203,82 @@ impl App {
                                         last_reload = Some(now);
                                         println!("🔄 Hot Reload requested (F5)...");
 
+                                        // -------------------------------------------------
+                                        // 1. SAVE STATE (Host Authority, Strategy B)
+                                        // -------------------------------------------------
+                                        let required_size =
+                                            (game_plugin.api.get_state_size)(game_plugin.api.state);
+
+                                        let mut snapshot_buffer = if required_size > 0 {
+                                            vec![0u8; required_size]
+                                        } else {
+                                            Vec::new()
+                                        };
+
+                                        let written_len = if !snapshot_buffer.is_empty() {
+                                            (game_plugin.api.save_state)(
+                                                game_plugin.api.state,
+                                                snapshot_buffer.as_mut_ptr(),
+                                                snapshot_buffer.len(),
+                                            )
+                                        } else {
+                                            0
+                                        };
+
+                                        // Validate write.
+                                        if written_len == 0 && required_size > 0 {
+                                            eprintln!(
+                                                "⚠️ Plugin failed to write snapshot. \
+                                                 Reloading with fresh state."
+                                            );
+                                            snapshot_buffer.clear();
+                                        } else if written_len > 0
+                                            && written_len < snapshot_buffer.len()
+                                        {
+                                            // Plugin wrote fewer bytes than reserved; shrink.
+                                            snapshot_buffer.truncate(written_len);
+                                        }
+
+                                        // -------------------------------------------------
+                                        // 2. ATOMIC SWAP HANDSHAKE
+                                        // -------------------------------------------------
                                         unsafe {
                                             match hot_reload::GamePlugin::load(plugin_path) {
                                                 Ok(mut new_plugin) => {
-                                                    // Call on_load on the new plugin so it can renegotiate IDs.
-                                                    (new_plugin.api.on_load)(
+                                                    println!("Verifying new plugin...");
+
+                                                    let success = (new_plugin.api.on_load)(
                                                         new_plugin.api.state,
                                                         &mut world as *mut _
-                                                            as *mut HostContext, // <--- cast here
-                                                        &host_interface,
+                                                            as *mut HostContext,
+                                                        &host_interface as *const _,
+                                                        if snapshot_buffer.is_empty() {
+                                                            std::ptr::null()
+                                                        } else {
+                                                            snapshot_buffer.as_ptr()
+                                                        },
+                                                        snapshot_buffer.len(),
                                                     );
 
-                                                    // Swap: dropping old plugin will unload old lib.
-                                                    game_plugin = new_plugin;
-                                                    println!(
-                                                        "✅ Hot Reload Success! Plugin replaced."
-                                                    );
+                                                    if success {
+                                                        // Phase 3: Commit (Swap)
+                                                        game_plugin = new_plugin;
+                                                        println!(
+                                                            "✅ Hot Reload Success! State preserved."
+                                                        );
+                                                    } else {
+                                                        // Phase 4: Abort
+                                                        eprintln!(
+                                                            "❌ New plugin rejected the snapshot. \
+                                                             Keeping old plugin active."
+                                                        );
+                                                        // new_plugin dropped here; old one kept.
+                                                    }
                                                 }
                                                 Err(e) => {
-                                                    eprintln!("❌ Hot Reload Failed: {}", e);
+                                                    eprintln!(
+                                                        "❌ Hot Reload Failed (Load Error): {e}"
+                                                    );
                                                     eprintln!(
                                                         "Continuing with currently loaded plugin."
                                                     );
@@ -249,15 +318,19 @@ impl App {
                             );
 
                             let gui_output = self.egui_ctx.end_frame();
-                            let primitives =
-                                self.egui_ctx
-                                    .tessellate(gui_output.shapes, gui_output.pixels_per_point);
+                            let primitives = self.egui_ctx.tessellate(
+                                gui_output.shapes,
+                                gui_output.pixels_per_point,
+                            );
                             let textures_delta = gui_output.textures_delta;
 
-                            self.egui_winit.as_mut().unwrap().handle_platform_output(
-                                &window,
-                                gui_output.platform_output,
-                            );
+                            self.egui_winit
+                                .as_mut()
+                                .unwrap()
+                                .handle_platform_output(
+                                    &window,
+                                    gui_output.platform_output,
+                                );
 
                             let _ = renderer.render(
                                 &world,
@@ -308,8 +381,8 @@ impl App {
                         unsafe {
                             (game_plugin.api.update)(
                                 game_plugin.api.state,
-                                &mut world as *mut _ as *mut HostContext, // <--- cast here
-                                &final_input_state,
+                                &mut world as *mut _ as *mut HostContext,
+                                &final_input_state as *const _,
                                 dt,
                             );
                         }
