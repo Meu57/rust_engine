@@ -1,23 +1,21 @@
-// crates/game_plugin/src/systems/enemy.rs
-
 //! Enemy spawning for the plugin.
-//! This version is FFI-safe: the plugin does *not* mutate the host World directly.
-//! Instead it calls the host-provided `spawn_fn(world_ptr, x, y)` to request spawns.
+//! The plugin does *not* mutate the host World directly.
+//! Instead it calls the host-provided `spawn_fn(ctx, x, y)` to request spawns.
 
-use std::ffi::c_void;
+use engine_shared::HostContext;
 
 /// Spawn enemies by calling back into the host.
 ///
-/// - `spawn_fn` : extern "C" fn(*mut c_void, f32, f32) provided by the host.
-/// - `world_ptr` : opaque pointer to host World (plugin must not dereference it).
+/// - `spawn_fn`  : extern "C" fn(*mut HostContext, f32, f32) provided by the host.
+/// - `world_ctx` : opaque pointer to host context (actually a World on the host side).
 /// - `timer`     : spawn timer (mutable reference owned by plugin instance).
 /// - `dt`        : delta time this frame.
 ///
 /// NOTE: The actual allocation / ECS mutation happens inside the host implementation
-/// of `spawn_fn`. The plugin only computes when/where to spawn and requests it.
+///       of `spawn_fn`. The plugin only computes when/where to spawn and requests it.
 pub fn spawn_enemies(
-    spawn_fn: extern "C" fn(*mut c_void, f32, f32),
-    world_ptr: *mut c_void,
+    spawn_fn: extern "C" fn(*mut HostContext, f32, f32),
+    world_ctx: *mut HostContext,
     timer: &mut f32,
     dt: f32,
 ) {
@@ -32,8 +30,7 @@ pub fn spawn_enemies(
         let rx = (dt * 12345.0).rem_euclid(1280.0);
         let ry = (dt * 67890.0).rem_euclid(720.0);
 
-        // Safety: plugin must not dereference world_ptr.
-        // The host implementation of `spawn_fn` will cast it back to &mut World and mutate safely.
-        spawn_fn(world_ptr, rx, ry);
+        // Plugin never dereferences world_ctx; host will cast it to &mut World internally.
+        spawn_fn(world_ctx, rx, ry);
     }
 }

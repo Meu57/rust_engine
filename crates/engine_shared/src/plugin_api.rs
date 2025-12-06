@@ -2,37 +2,71 @@
 use core::ffi::{c_char, c_void};
 use crate::input_types::{ActionId, InputState};
 
-/// Host-provided function table (V-table) exposed to plugins.
-/// #[repr(C)] guarantees the layout is preserved across FFI boundaries.
+// ==================================================================================
+// 1. OPAQUE HANDLE (The "Firewall")
+// ==================================================================================
+
+/// Represents the Host's internal state (World, Resources, etc.).
+/// 
+/// PROPERTIES:
+/// 1. Opaque: The plugin cannot see the fields (size is 0), so it cannot access memory directly.
+/// 2. Type-Safe: It is a distinct type from `*mut c_void`, preventing accidental pointer mixing.
+/// 3. !Send/!Sync: PhantomData ensures this handle stays on the main thread.
+#[repr(C)]
+pub struct HostContext {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
+// ==================================================================================
+// 2. STRUCTURAL HASHING (The "Handshake")
+// ==================================================================================
+
+/// Helper to calculate a stable hash of a struct's layout.
+/// In a real engine, this would be a derive macro (#[derive(StableLayout)]).
+/// Here, we manually implement a simple FNV-1a hash for demonstration.
+pub fn calculate_layout_hash(type_name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    for b in type_name.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    // In a real implementation, we would hash fields and alignments here.
+    // For now, we hash the name to simulate "checking the definition".
+    hash
+}
+
+// ==================================================================================
+// 3. HOST INTERFACE
+// ==================================================================================
+
 #[repr(C)]
 pub struct HostInterface {
-    /// Resolve action name -> ActionId
     pub get_action_id: extern "C" fn(name_ptr: *const u8, name_len: usize) -> ActionId,
-    /// Optional logging callback from plugin -> host
     pub log: Option<extern "C" fn(msg: *const c_char)>,
-    /// Host-provided spawn function: host receives opaque world_ptr and does the allocation.
-    pub spawn_enemy: extern "C" fn(world_ptr: *mut c_void, x: f32, y: f32),
+    
+    // SAFETY FIX: Now takes `*mut HostContext` instead of `*mut c_void`
+    pub spawn_enemy: extern "C" fn(ctx: *mut HostContext, x: f32, y: f32),
 }
 
-/// Plugin -> Host function table returned by the plugin on creation.
-/// This manual V-table replaces `dyn GameLogic` to ensure ABI stability.
+// ==================================================================================
+// 4. PLUGIN API
+// ==================================================================================
+
 #[repr(C)]
 pub struct PluginApi {
-    /// Opaque plugin state pointer (owned by the plugin).
     pub state: *mut c_void,
-    /// Called once after plugin creation: (state, world_ptr, host_interface)
-    pub on_load: extern "C" fn(*mut c_void, *mut c_void, &HostInterface),
-    /// Called every frame: (state, world_ptr, input_state, dt)
-    pub update: extern "C" fn(*mut c_void, *mut c_void, &InputState, f32),
-    /// Optional unload hook: (state, world_ptr)
-    pub on_unload: extern "C" fn(*mut c_void, *mut c_void),
-    /// Plugin-owned destructor: host calls this to let the plugin free its state.
+    
+    // Lifecycle methods now use `HostContext`
+    pub on_load: extern "C" fn(*mut c_void, *mut HostContext, &HostInterface),
+    pub update: extern "C" fn(*mut c_void, *mut HostContext, &InputState, f32),
+    pub on_unload: extern "C" fn(*mut c_void, *mut HostContext),
     pub drop: extern "C" fn(*mut c_void),
-}
 
-/// Minimal trait used for in-process plugin style compatibility (kept for convenience)
-pub trait GameLogic {
-    fn on_load(&mut self, _world: &mut dyn std::any::Any, _host: &HostInterface) {}
-    fn update(&mut self, _world: &mut dyn std::any::Any, _input: &InputState, _dt: f32) {}
-    fn on_unload(&mut self, _world: &mut dyn std::any::Any) {}
+    // NEW: The Safety Check
+    // The Host calls this immediately after loading. 
+    // If the hash doesn't match the Host's expectation, the load is aborted.
+    pub get_layout_hash: extern "C" fn() -> u64, 
 }
