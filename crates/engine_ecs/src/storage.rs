@@ -1,4 +1,3 @@
-// crates/engine_ecs/src/storage.rs
 use crate::Entity;
 
 // The trait allows us to treat different component storages generically
@@ -24,7 +23,7 @@ impl<T: 'static> SparseSet<T> {
 
     pub fn insert(&mut self, entity: Entity, value: T) {
         let index = entity.index();
-        
+
         // Resize sparse array if the entity index is too big
         if index >= self.sparse.len() {
             self.sparse.resize(index + 1, None);
@@ -56,7 +55,20 @@ impl<T: 'static> SparseSet<T> {
         None
     }
 
-    // --- Added Methods ---
+    /// O(1) mutable lookup by Entity using the sparse index + generation check.
+    pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
+        let index = entity.index();
+        if index < self.sparse.len() {
+            if let Some(dense_index) = self.sparse[index] {
+                if self.entities[dense_index].generation() == entity.generation() {
+                    return self.dense.get_mut(dense_index);
+                }
+            }
+        }
+        None
+    }
+
+    // --- Existing methods ---
 
     // Expose the raw data for linear iteration (The "D" in DOD)
     pub fn as_slice(&self) -> &[T] {
