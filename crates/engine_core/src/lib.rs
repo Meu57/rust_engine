@@ -9,7 +9,7 @@ pub mod host;   // <--- NEW
 pub mod scene;  // <--- NEW
 
 // Internal Implementation Modules
-mod hot_reload;
+
 mod renderer;
 pub mod gui;            // <--- NEW
 pub mod plugin_manager; // <--- NEW

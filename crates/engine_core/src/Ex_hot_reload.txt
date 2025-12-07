@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use engine_shared::{PluginApi, ENGINE_API_VERSION, calculate_layout_hash};
+use engine_shared::{PluginApi, ENGINE_API_VERSION, calculate_layout_hash}; 
 
 /// Must match the plugin's MYGAME_LAYOUT_ID
 /// (see crates/game_plugin/src/lib.rs)
@@ -80,11 +80,11 @@ impl GamePlugin {
         //
         // Host and Plugin must agree on the MyGame snapshot layout ID.
         let host_hash = calculate_layout_hash(MYGAME_LAYOUT_ID);
-        let plugin_hash = (api.get_layout_hash)();
+        let plugin_hash = (api.get_layout_hash)(); 
 
         if host_hash != plugin_hash {
             return Err(format!(
-                "CRITICAL: Layout Mismatch! Host expects hash 0x{:X}, Plugin provided 0x{:X}. \
+                "CRITICAL: Layout Mismatch! Host expects hash 0x{:X}, Plugin provided 0x{:X}. 
                  This means the MyGame snapshot layout differs. Recompile engine + plugin.",
                 host_hash, plugin_hash
             ).into());
@@ -122,7 +122,7 @@ fn unique_copy_path(original: &Path) -> Result<PathBuf, Box<dyn Error>> {
 impl Drop for GamePlugin {
     fn drop(&mut self) {
         // Important: Let the plugin free its own state memory before we unload the lib
-        (self.api.drop)(self.api.state);
+        (self.api.drop)(self.api.state); 
 
         // Attempt to delete the temporary file.
         let _ = fs::remove_file(&self.plugin_path);

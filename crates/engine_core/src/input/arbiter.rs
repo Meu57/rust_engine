@@ -1,154 +1,211 @@
+// crates/engine_core/src/input/arbiter.rs
+
 use glam::Vec2;
-use engine_shared::{
-    ActionSignal, InputState, MovementSignal, PriorityLayer,
+
+use engine_shared::input_types::{
+    ActionId,
+    InputState,
+    PriorityLayer,
+    canonical_actions,
 };
 
-// Define Action Bitflags (Masks)
 pub mod channels {
-    pub const MOVE: u64   = 0b0000_1111; // IDs 0,1,2,3 (Up, Down, Left, Right)
-    pub const LOOK: u64   = 0b0000_0000; // Reserved
-    pub const ACTION: u64 = 0b0001_0000; // ID 4
-    pub const PAUSE: u64  = 0b0010_0000; // ID 5
-    pub const ALL: u64    = u64::MAX;
+    use engine_shared::input_types::canonical_actions::*;
+
+    // Mask for all movement bits based on shared Action IDs
+    pub const MASK_MOVE: u64 =
+        (1 << MOVE_UP) | (1 << MOVE_DOWN) | (1 << MOVE_LEFT) | (1 << MOVE_RIGHT);
+    pub const MASK_ALL: u64 = !0;
 }
 
-/// Per-layer persistent state for temporal locking.
-/// Instead of using real time, we count in frames.
-#[derive(Default)]
-pub struct LayerState {
+#[derive(Clone, Copy)]
+pub struct LayerConfig {
+    pub layer: PriorityLayer,
+    pub allowed_mask_when_active: u64,
+    pub lock_on_activation: bool,
+    pub lock_frames_on_activation: u32,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct LayerRuntimeState {
     pub lock_frames_remaining: u32,
-    pub persistent_mask: u64,
+    pub locked_permission_mask: u64,
 }
 
-#[derive(Default)]
+pub struct MovementSignal {
+    pub layer: PriorityLayer,
+    pub vector: Vec2,
+    pub weight: f32,
+}
+
+pub struct ActionSignal {
+    pub layer: PriorityLayer,
+    pub action_id: ActionId,
+    pub active: bool,
+}
+
 pub struct Arbiter {
+    pub layer_configs: Vec<LayerConfig>,
+    pub layer_state: Vec<LayerRuntimeState>,
     pub move_signals: Vec<MovementSignal>,
     pub action_signals: Vec<ActionSignal>,
-    pub layer_states: [LayerState; 4], // Reflex, Cutscene, Control, Ambient
+    pub deadzone: f32,
+}
+
+impl Default for Arbiter {
+    fn default() -> Self {
+        Self {
+            layer_configs: Vec::new(),
+            layer_state: Vec::new(),
+            move_signals: Vec::new(),
+            action_signals: Vec::new(),
+            deadzone: 0.1,
+        }
+    }
 }
 
 impl Arbiter {
+    pub fn new(layer_configs: Vec<LayerConfig>, deadzone: f32) -> Self {
+        let layer_state = vec![LayerRuntimeState::default(); layer_configs.len()];
+        Self {
+            layer_configs,
+            layer_state,
+            move_signals: Vec::new(),
+            action_signals: Vec::new(),
+            deadzone,
+        }
+    }
+
     pub fn clear(&mut self) {
         self.move_signals.clear();
         self.action_signals.clear();
     }
 
     pub fn add_movement(&mut self, signal: MovementSignal) {
-        self.move_signals.push(signal);
+        if signal.vector != Vec2::ZERO {
+            self.move_signals.push(signal);
+        }
     }
 
     pub fn add_action(&mut self, signal: ActionSignal) {
         self.action_signals.push(signal);
     }
 
-    /// Resolve the final InputState for this frame.
-    /// Uses per-frame temporal locking: certain layers (e.g. Reflex)
-    /// can keep their suppression active for a few frames even after
-    /// the original signal is gone.
     pub fn resolve(&mut self) -> InputState {
         let mut state = InputState::default();
 
-        // ---------------------------------------------------------
-        // 1. Resolve Movement (Winner Takes All)
-        // ---------------------------------------------------------
-        let mut winning_move_layer = PriorityLayer::Ambient;
+        // FIRST PASS: compute activity per layer using only immutable borrows.
+        let layer_activities: Vec<bool> = self
+            .layer_configs
+            .iter()
+            .map(|cfg| self.layer_has_activity(cfg.layer))
+            .collect();
 
-        for &layer in &[
-            PriorityLayer::Reflex,
-            PriorityLayer::Cutscene,
-            PriorityLayer::Control,
-        ] {
-            let has_signal = self.move_signals.iter().any(|s| s.layer == layer);
-            if has_signal {
-                winning_move_layer = layer;
+        // SECOND PASS: mutate layer_state + compute global_permission.
+        let mut global_permission: u64 = channels::MASK_ALL;
+
+        for (idx, config) in self.layer_configs.iter().enumerate() {
+            let runtime = &mut self.layer_state[idx];
+            let layer_active = layer_activities[idx];
+
+            let layer_mask = if runtime.lock_frames_remaining > 0 {
+                runtime.lock_frames_remaining -= 1;
+                runtime.locked_permission_mask
+            } else if layer_active {
+                let mask = config.allowed_mask_when_active;
+                if config.lock_on_activation && config.lock_frames_on_activation > 0 {
+                    runtime.lock_frames_remaining = config.lock_frames_on_activation;
+                    runtime.locked_permission_mask = mask;
+                }
+                mask
+            } else {
+                channels::MASK_ALL
+            };
+
+            global_permission &= layer_mask;
+        }
+
+        // Resolve analog
+        let final_vector = self.resolve_movement(global_permission);
+        state.analog_axes[0] = final_vector.x;
+        state.analog_axes[1] = final_vector.y;
+
+        // Resolve digital
+        let mut digital_requests: u64 = 0;
+        for sig in &self.action_signals {
+            let bit_index = sig.action_id as u32;
+            if bit_index < 64 && sig.active {
+                digital_requests |= 1u64 << bit_index;
+            }
+        }
+        state.digital_mask = digital_requests & global_permission;
+
+        state
+    }
+
+    fn layer_has_activity(&self, layer: PriorityLayer) -> bool {
+        self.move_signals
+            .iter()
+            .any(|s| s.layer == layer && s.vector != Vec2::ZERO)
+            || self
+                .action_signals
+                .iter()
+                .any(|s| s.layer == layer && s.active)
+    }
+
+    fn resolve_movement(&self, global_permission: u64) -> Vec2 {
+        use engine_shared::input_types::canonical_actions::*;
+
+        if self.move_signals.is_empty() {
+            return Vec2::ZERO;
+        }
+
+        let mut winning_layer: Option<PriorityLayer> = None;
+        for cfg in &self.layer_configs {
+            if self
+                .move_signals
+                .iter()
+                .any(|s| s.layer == cfg.layer && s.vector != Vec2::ZERO)
+            {
+                winning_layer = Some(cfg.layer);
                 break;
             }
         }
 
-        let mut final_vector = Vec2::ZERO;
-        for s in &self.move_signals {
-            if s.layer == winning_move_layer {
-                final_vector += s.vector * s.weight;
+        let Some(layer) = winning_layer else { return Vec2::ZERO; };
+        let mut raw = Vec2::ZERO;
+        for sig in &self.move_signals {
+            if sig.layer == layer {
+                raw += sig.vector * sig.weight;
             }
         }
 
-        if final_vector.length_squared() > 1.0 {
-            final_vector = final_vector.normalize();
+        let mut final_vec = raw;
+        // Clamp axis components if specific direction bits are suppressed
+        if (global_permission & (1 << MOVE_RIGHT)) == 0 && final_vec.x > 0.0 {
+            final_vec.x = 0.0;
+        }
+        if (global_permission & (1 << MOVE_LEFT)) == 0 && final_vec.x < 0.0 {
+            final_vec.x = 0.0;
+        }
+        if (global_permission & (1 << MOVE_UP)) == 0 && final_vec.y > 0.0 {
+            final_vec.y = 0.0;
+        }
+        if (global_permission & (1 << MOVE_DOWN)) == 0 && final_vec.y < 0.0 {
+            final_vec.y = 0.0;
         }
 
-        state.analog_axes[0] = final_vector.x;
-        state.analog_axes[1] = final_vector.y;
-
-        // ---------------------------------------------------------
-        // 2. Resolve Actions (Layers + Temporal Locking)
-        // ---------------------------------------------------------
-        let mut global_suppression_mask: u64 = 0;
-
-        let layers = [
-            PriorityLayer::Reflex,
-            PriorityLayer::Cutscene,
-            PriorityLayer::Control,
-            PriorityLayer::Ambient,
-        ];
-
-        for (idx, &layer) in layers.iter().enumerate() {
-            // A. Build request mask for this layer from current signals
-            let mut layer_request_mask: u64 = 0;
-            for s in &self.action_signals {
-                if s.layer == layer && s.active {
-                    if (s.action_id as usize) < 64 {
-                        layer_request_mask |= 1u64 << s.action_id;
-                    }
-                }
-            }
-
-            // --- TEMPORAL LOCKING: reuse previous suppression if still locked ---
-            let layer_state = &mut self.layer_states[idx];
-
-            if layer_state.lock_frames_remaining > 0 {
-                layer_request_mask |= layer_state.persistent_mask;
-                layer_state.lock_frames_remaining -= 1;
-            }
-
-            // B. Decide this layer's suppression policy
-            let layer_suppression = match layer {
-                // Reflex suppresses movement + actions while active/locked
-                PriorityLayer::Reflex => {
-                    if layer_request_mask != 0 {
-                        channels::MOVE | channels::ACTION
-                    } else {
-                        0
-                    }
-                }
-                // Cutscenes suppress movement and actions
-                PriorityLayer::Cutscene => {
-                    if layer_request_mask != 0 {
-                        channels::MOVE | channels::ACTION
-                    } else {
-                        0
-                    }
-                }
-                // Control normally doesn't suppress others
-                PriorityLayer::Control => 0,
-                _ => 0,
-            };
-
-            // If Reflex just became active this frame, start a short lock window.
-            // At 60 FPS, 30 frames ~= 0.5 seconds.
-            if layer == PriorityLayer::Reflex && layer_request_mask != 0 {
-                if layer_state.lock_frames_remaining == 0 {
-                    layer_state.lock_frames_remaining = 30;
-                    layer_state.persistent_mask = layer_suppression;
-                }
-            }
-
-            // C. Apply global suppression
-            let allowed = layer_request_mask & !global_suppression_mask;
-            state.digital_mask |= allowed;
-
-            global_suppression_mask |= layer_suppression;
+        if final_vec.x.abs() < self.deadzone {
+            final_vec.x = 0.0;
+        }
+        if final_vec.y.abs() < self.deadzone {
+            final_vec.y = 0.0;
         }
 
-        state
+        let len_sq = final_vec.length_squared();
+        if len_sq > 1.0 {
+            final_vec /= len_sq.sqrt();
+        }
+        final_vec
     }
 }

@@ -7,6 +7,16 @@ use glam::Vec2;
 pub type ActionId = u32;
 pub const ACTION_NOT_FOUND: ActionId = u32::MAX;
 
+/// Canonical Action IDs for core movement.
+/// App must register these first to ensure they get IDs 0..3.
+pub mod canonical_actions {
+    use super::ActionId;
+    pub const MOVE_UP: ActionId    = 0;
+    pub const MOVE_DOWN: ActionId  = 1;
+    pub const MOVE_LEFT: ActionId  = 2;
+    pub const MOVE_RIGHT: ActionId = 3;
+}
+
 /// Maximum number of analog axes we expose across FFI
 pub const MAX_AXES: usize = 8;
 
@@ -76,7 +86,6 @@ impl Default for InputState {
 }
 
 impl InputState {
-    /// Safe check; returns false for out-of-range ids (including ACTION_NOT_FOUND).
     pub fn is_active(&self, action_id: ActionId) -> bool {
         if (action_id as usize) >= 64 {
             return false;
@@ -93,11 +102,7 @@ impl InputState {
     }
 }
 
-/// Compact, deterministic per-frame input snapshot used for network/replay.
-/// - `tick`: frame/tick index
-/// - `actions`: u64 bitmask of resolved digital intents
-/// - `move_vector`: quantized fixed-point vector (x,y) where value = axis * 1000
-/// - `rng_seed`: deterministic RNG seed for this frame
+/// Compact per-frame input snapshot for deterministic replay/netcode.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FrameInputState {
@@ -108,30 +113,20 @@ pub struct FrameInputState {
 }
 
 impl FrameInputState {
-    /// Convert an `InputState` into a compact `FrameInputState` suitable for
-    /// networking and deterministic replay. The analog axes are quantized to
-    /// fixed-point (axis * 1000) and stored as `i16`. We round before casting
-    /// and clamp to i16 range for safety.
     pub fn from_state(tick: u64, seed: u64, state: &InputState) -> Self {
-        // Quantize float vector to stable integer for network/replay (scale = 1000)
         let scale = 1000.0_f32;
-
         let raw_x = (state.analog_axes[0] * scale).round();
         let raw_y = (state.analog_axes[1] * scale).round();
-
-        let x = clamp_i16(raw_x as i64);
-        let y = clamp_i16(raw_y as i64);
 
         Self {
             tick,
             actions: state.digital_mask,
-            move_vector: [x, y],
+            move_vector: [clamp_i16(raw_x as i64), clamp_i16(raw_y as i64)],
             rng_seed: seed,
         }
     }
 }
 
-/// Helper: clamp an i64 into i16 range and return i16.
 fn clamp_i16(v: i64) -> i16 {
     if v > i16::MAX as i64 {
         i16::MAX
@@ -141,4 +136,3 @@ fn clamp_i16(v: i64) -> i16 {
         v as i16
     }
 }
- 
