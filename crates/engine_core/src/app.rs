@@ -1,8 +1,5 @@
 // crates/engine_core/src/app.rs
-#![allow(dead_code)]
-
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use glam::Vec2;
 use winit::{
@@ -12,17 +9,16 @@ use winit::{
     window::WindowBuilder,
 };
 
-// Use our new modules
-use crate::hot_reload;
+// Modules
 use crate::renderer::Renderer;
 use crate::input::{self, ActionRegistry, Arbiter, InputMap};
 use crate::inspector;
-use crate::scene; // <--- NEW
-use crate::host;  // <--- NEW
+use crate::scene;
+use crate::host;
+use crate::gui::GuiSystem;
+use crate::plugin_manager::PluginManager;
 
-use engine_shared::{
-    HostInterface, PriorityLayer, ActionSignal, MovementSignal, HostContext,
-};
+use engine_shared::{PriorityLayer, ActionSignal, MovementSignal};
 use engine_ecs::World;
 
 pub struct App {
@@ -30,11 +26,9 @@ pub struct App {
     input_map: InputMap,
     arbiter: Arbiter,
     window_title: String,
-
-    // GUI State
-    egui_ctx: egui::Context,
-    egui_winit: Option<egui_winit::State>,
-    show_inspector: bool,
+    
+    // Sub-systems
+    gui: GuiSystem,
 }
 
 impl App {
@@ -59,10 +53,8 @@ impl App {
             registry,
             input_map,
             arbiter: Arbiter::default(),
-            window_title: "Rust Engine: Input Inspector".to_string(),
-            egui_ctx: egui::Context::default(),
-            egui_winit: None,
-            show_inspector: true,
+            window_title: "Rust Engine: Modular Architecture".to_string(),
+            gui: GuiSystem::new(),
         }
     }
 
@@ -74,60 +66,28 @@ impl App {
             .build(&event_loop)
             .unwrap();
 
-        self.egui_winit = Some(egui_winit::State::new(
-            self.egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-        ));
+        // Initialize GUI with the window
+        self.gui.init(&window);
 
         let mut renderer = pollster::block_on(Renderer::new(&window));
         let mut world = World::new();
 
-        // --- NEW: Use the scene module to setup the world ---
         scene::setup_default_world(&mut world);
-
-        // Plugin path
-        let plugin_path: &'static str = "target/debug/game_plugin.dll";
-
-        // Initial load
-        let mut game_plugin =
-            unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
-
-        // --- NEW: Use the host module to create the interface ---
         let host_interface = host::create_interface();
 
-        // Initial negotiation with plugin (no snapshot yet).
-        unsafe {
-            let ok = (game_plugin.api.on_load)(
-                game_plugin.api.state,
-                &mut world as *mut _ as *mut HostContext,
-                &host_interface as *const _,
-                std::ptr::null(),
-                0,
-            );
-
-            if !ok {
-                eprintln!(
-                    "Warning: initial plugin on_load() reported failure. \
-                     Continuing with plugin default state."
-                );
-            }
-        }
+        // Initialize Plugin Manager
+        let mut plugin_manager = PluginManager::new("target/debug/game_plugin.dll");
+        plugin_manager.initial_load(&mut world, &host_interface);
 
         let mut active_keys: Vec<KeyCode> = Vec::new();
-        let mut last_reload: Option<Instant> = None;
-        let reload_debounce = Duration::from_millis(500);
 
         event_loop
             .run(move |event, elwt| {
                 elwt.set_control_flow(ControlFlow::Poll);
 
-                if let Some(gui_state) = &mut self.egui_winit {
-                    if let Event::WindowEvent { event: ref w_event, .. } = event {
-                        let _ = gui_state.on_window_event(&window, w_event);
-                    }
+                // 1. GUI Event Handling
+                if let Event::WindowEvent { event: ref w_event, .. } = event {
+                    self.gui.handle_event(&window, w_event);
                 }
 
                 match event {
@@ -137,86 +97,20 @@ impl App {
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
                             if key_event.state == ElementState::Pressed {
                                 if let PhysicalKey::Code(KeyCode::F1) = key_event.physical_key {
-                                    self.show_inspector = !self.show_inspector;
+                                    self.gui.toggle_inspector();
                                 }
-                            }
-
-                            // HOT-RELOAD TRIGGER (F5)
-                            if key_event.state == ElementState::Pressed {
+                                
+                                // Hot Reload Delegation
                                 if let PhysicalKey::Code(KeyCode::F5) = key_event.physical_key {
-                                    let now = Instant::now();
-                                    let allowed = last_reload
-                                        .map(|t| now.duration_since(t) >= reload_debounce)
-                                        .unwrap_or(true);
-
-                                    if allowed {
-                                        last_reload = Some(now);
-                                        println!("🔄 Hot Reload requested (F5)...");
-
-                                        // 1. SAVE STATE (Host Authority)
-                                        let required_size =
-                                            (game_plugin.api.get_state_size)(game_plugin.api.state);
-
-                                        let mut snapshot_buffer = if required_size > 0 {
-                                            vec![0u8; required_size]
-                                        } else {
-                                            Vec::new()
-                                        };
-
-                                        let written_len = if !snapshot_buffer.is_empty() {
-                                            (game_plugin.api.save_state)(
-                                                game_plugin.api.state,
-                                                snapshot_buffer.as_mut_ptr(),
-                                                snapshot_buffer.len(),
-                                            )
-                                        } else {
-                                            0
-                                        };
-
-                                        if written_len == 0 && required_size > 0 {
-                                            eprintln!("⚠️ Plugin failed to write snapshot.");
-                                            snapshot_buffer.clear();
-                                        } else if written_len > 0 && written_len < snapshot_buffer.len() {
-                                            snapshot_buffer.truncate(written_len);
-                                        }
-
-                                        // 2. ATOMIC SWAP HANDSHAKE
-                                        unsafe {
-                                            match hot_reload::GamePlugin::load(plugin_path) {
-                                                Ok(mut new_plugin) => {
-                                                    println!("Verifying new plugin...");
-                                                    let success = (new_plugin.api.on_load)(
-                                                        new_plugin.api.state,
-                                                        &mut world as *mut _ as *mut HostContext,
-                                                        &host_interface as *const _,
-                                                        if snapshot_buffer.is_empty() {
-                                                            std::ptr::null()
-                                                        } else {
-                                                            snapshot_buffer.as_ptr()
-                                                        },
-                                                        snapshot_buffer.len(),
-                                                    );
-
-                                                    if success {
-                                                        game_plugin = new_plugin;
-                                                        println!("✅ Hot Reload Success! State preserved.");
-                                                    } else {
-                                                        eprintln!("❌ New plugin rejected the snapshot. Keeping old plugin.");
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("❌ Hot Reload Failed (Load Error): {e}");
-                                                }
-                                            }
-                                        }
-                                    }
+                                    plugin_manager.try_hot_reload(&mut world, &host_interface);
                                 }
                             }
 
-                            if self.egui_ctx.wants_keyboard_input() {
+                            if self.gui.wants_keyboard_input() {
                                 return;
                             }
 
+                            // Input Tracking
                             if let PhysicalKey::Code(keycode) = key_event.physical_key {
                                 if key_event.state == ElementState::Pressed {
                                     if !active_keys.contains(&keycode) {
@@ -231,37 +125,24 @@ impl App {
                         WindowEvent::Resized(size) => renderer.resize(size),
 
                         WindowEvent::RedrawRequested => {
-                            let raw_input =
-                                self.egui_winit.as_mut().unwrap().take_egui_input(&window);
-                            self.egui_ctx.begin_frame(raw_input);
+                            // 2. GUI Drawing & Rendering
+                            
+                            // FIX: We copy 'show_inspector' to a local variable to break the borrow.
+                            // The closure borrows 'inspector_open', unrelated to 'self.gui'.
+                            let mut inspector_open = self.gui.show_inspector;
+                            
+                            let (primitives, textures_delta) = self.gui.draw(&window, |ctx| {
+                                inspector::show(ctx, &self.arbiter, &mut inspector_open);
+                            });
 
-                            inspector::show(
-                                &self.egui_ctx,
-                                &self.arbiter,
-                                &mut self.show_inspector,
-                            );
-
-                            let gui_output = self.egui_ctx.end_frame();
-                            let primitives = self.egui_ctx.tessellate(
-                                gui_output.shapes,
-                                gui_output.pixels_per_point,
-                            );
-                            let textures_delta = gui_output.textures_delta;
-
-                            self.egui_winit
-                                .as_mut()
-                                .unwrap()
-                                .handle_platform_output(
-                                    &window,
-                                    gui_output.platform_output,
-                                );
+                            // Write the state back
+                            self.gui.show_inspector = inspector_open;
 
                             let _ = renderer.render(
                                 &world,
-                                Some((&self.egui_ctx, &primitives, &textures_delta)),
+                                Some((&self.gui.ctx, &primitives, &textures_delta)),
                             );
                         }
-
                         _ => (),
                     },
 
@@ -269,6 +150,7 @@ impl App {
                         let dt = 1.0 / 60.0;
                         self.arbiter.clear();
 
+                        // 3. Input Processing
                         for &key in &active_keys {
                             let physical = PhysicalKey::Code(key);
                             if let Some(action_id) =
@@ -282,7 +164,7 @@ impl App {
                             }
                         }
 
-                        // Debug: Keep Reflex layer override for testing
+                        // Debug: Reflex test
                         if active_keys.contains(&KeyCode::KeyP) {
                             self.arbiter.add_movement(MovementSignal {
                                 layer: PriorityLayer::Reflex,
@@ -298,18 +180,11 @@ impl App {
 
                         let final_input_state = self.arbiter.resolve();
 
-                        unsafe {
-                            (game_plugin.api.update)(
-                                game_plugin.api.state,
-                                &mut world as *mut _ as *mut HostContext,
-                                &final_input_state as *const _,
-                                dt,
-                            );
-                        }
+                        // 4. Game Update
+                        plugin_manager.update(&mut world, &final_input_state, dt);
 
                         window.request_redraw();
                     }
-
                     _ => (),
                 }
             })
