@@ -12,49 +12,18 @@ use winit::{
     window::WindowBuilder,
 };
 
+// Use our new modules
 use crate::hot_reload;
 use crate::renderer::Renderer;
 use crate::input::{self, ActionRegistry, Arbiter, InputMap};
 use crate::inspector;
+use crate::scene; // <--- NEW
+use crate::host;  // <--- NEW
+
 use engine_shared::{
-    CEnemy, CPlayer, CSprite, CTransform, HostInterface, PriorityLayer,
-    ActionSignal, MovementSignal, HostContext,
+    HostInterface, PriorityLayer, ActionSignal, MovementSignal, HostContext,
 };
 use engine_ecs::World;
-
-/// Host-side spawn function exposed to plugins via HostInterface
-///
-/// NOTE: The plugin sees `HostContext` as an opaque pointer. Here, the host
-/// knows that HostContext is really `World`, so this is the one legit place
-/// to cast it back.
-extern "C" fn host_spawn_enemy(ctx: *mut HostContext, x: f32, y: f32) {
-    if ctx.is_null() {
-        eprintln!("host_spawn_enemy called with null HostContext");
-        return;
-    }
-
-    unsafe {
-        // Cast HostContext back to World.
-        let world = &mut *(ctx as *mut World);
-
-        let enemy = world.spawn();
-        world.add_component(
-            enemy,
-            CTransform {
-                pos: Vec2::new(x, y),
-                scale: Vec2::splat(0.8),
-                rotation: 0.0,
-            },
-        );
-        world.add_component(enemy, CEnemy { speed: 100.0 });
-        world.add_component(
-            enemy,
-            CSprite {
-                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-            },
-        );
-    }
-}
 
 pub struct App {
     registry: ActionRegistry,
@@ -74,7 +43,6 @@ impl App {
         let mut input_map = InputMap::default();
 
         // Register canonical actions
-        // NOTE: In a real engine, these would likely be loaded from a config file.
         let move_up = registry.register("MoveUp");
         let move_down = registry.register("MoveDown");
         let move_left = registry.register("MoveLeft");
@@ -117,21 +85,8 @@ impl App {
         let mut renderer = pollster::block_on(Renderer::new(&window));
         let mut world = World::new();
 
-        world.register_component::<CTransform>();
-        world.register_component::<CPlayer>();
-        world.register_component::<CEnemy>();
-        world.register_component::<CSprite>();
-
-        let player = world.spawn();
-        world.add_component(
-            player,
-            CTransform {
-                pos: Vec2::new(100.0, 100.0),
-                ..Default::default()
-            },
-        );
-        world.add_component(player, CPlayer);
-        world.add_component(player, CSprite::default());
+        // --- NEW: Use the scene module to setup the world ---
+        scene::setup_default_world(&mut world);
 
         // Plugin path
         let plugin_path: &'static str = "target/debug/game_plugin.dll";
@@ -140,12 +95,8 @@ impl App {
         let mut game_plugin =
             unsafe { hot_reload::GamePlugin::load(plugin_path).expect("Failed to load plugin") };
 
-        // Build HostInterface
-        let host_interface = HostInterface {
-            get_action_id: input::host_get_action_id,
-            log: None,
-            spawn_enemy: host_spawn_enemy,
-        };
+        // --- NEW: Use the host module to create the interface ---
+        let host_interface = host::create_interface();
 
         // Initial negotiation with plugin (no snapshot yet).
         unsafe {
@@ -194,7 +145,6 @@ impl App {
                             if key_event.state == ElementState::Pressed {
                                 if let PhysicalKey::Code(KeyCode::F5) = key_event.physical_key {
                                     let now = Instant::now();
-                                    // Debounce to prevent rapid reloading crashes.
                                     let allowed = last_reload
                                         .map(|t| now.duration_since(t) >= reload_debounce)
                                         .unwrap_or(true);
@@ -203,9 +153,7 @@ impl App {
                                         last_reload = Some(now);
                                         println!("🔄 Hot Reload requested (F5)...");
 
-                                        // -------------------------------------------------
-                                        // 1. SAVE STATE (Host Authority, Strategy B)
-                                        // -------------------------------------------------
+                                        // 1. SAVE STATE (Host Authority)
                                         let required_size =
                                             (game_plugin.api.get_state_size)(game_plugin.api.state);
 
@@ -225,32 +173,21 @@ impl App {
                                             0
                                         };
 
-                                        // Validate write.
                                         if written_len == 0 && required_size > 0 {
-                                            eprintln!(
-                                                "⚠️ Plugin failed to write snapshot. \
-                                                 Reloading with fresh state."
-                                            );
+                                            eprintln!("⚠️ Plugin failed to write snapshot.");
                                             snapshot_buffer.clear();
-                                        } else if written_len > 0
-                                            && written_len < snapshot_buffer.len()
-                                        {
-                                            // Plugin wrote fewer bytes than reserved; shrink.
+                                        } else if written_len > 0 && written_len < snapshot_buffer.len() {
                                             snapshot_buffer.truncate(written_len);
                                         }
 
-                                        // -------------------------------------------------
                                         // 2. ATOMIC SWAP HANDSHAKE
-                                        // -------------------------------------------------
                                         unsafe {
                                             match hot_reload::GamePlugin::load(plugin_path) {
                                                 Ok(mut new_plugin) => {
                                                     println!("Verifying new plugin...");
-
                                                     let success = (new_plugin.api.on_load)(
                                                         new_plugin.api.state,
-                                                        &mut world as *mut _
-                                                            as *mut HostContext,
+                                                        &mut world as *mut _ as *mut HostContext,
                                                         &host_interface as *const _,
                                                         if snapshot_buffer.is_empty() {
                                                             std::ptr::null()
@@ -261,27 +198,14 @@ impl App {
                                                     );
 
                                                     if success {
-                                                        // Phase 3: Commit (Swap)
                                                         game_plugin = new_plugin;
-                                                        println!(
-                                                            "✅ Hot Reload Success! State preserved."
-                                                        );
+                                                        println!("✅ Hot Reload Success! State preserved.");
                                                     } else {
-                                                        // Phase 4: Abort
-                                                        eprintln!(
-                                                            "❌ New plugin rejected the snapshot. \
-                                                             Keeping old plugin active."
-                                                        );
-                                                        // new_plugin dropped here; old one kept.
+                                                        eprintln!("❌ New plugin rejected the snapshot. Keeping old plugin.");
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    eprintln!(
-                                                        "❌ Hot Reload Failed (Load Error): {e}"
-                                                    );
-                                                    eprintln!(
-                                                        "Continuing with currently loaded plugin."
-                                                    );
+                                                    eprintln!("❌ Hot Reload Failed (Load Error): {e}");
                                                 }
                                             }
                                         }
@@ -343,11 +267,8 @@ impl App {
 
                     Event::AboutToWait => {
                         let dt = 1.0 / 60.0;
-
                         self.arbiter.clear();
 
-                        // The Engine now simply reports which Actions are active.
-                        // Interpretation is left entirely to the Game Plugin.
                         for &key in &active_keys {
                             let physical = PhysicalKey::Code(key);
                             if let Some(action_id) =
@@ -361,7 +282,7 @@ impl App {
                             }
                         }
 
-                        // Debug: Keep Reflex layer override for testing priorities (optional)
+                        // Debug: Keep Reflex layer override for testing
                         if active_keys.contains(&KeyCode::KeyP) {
                             self.arbiter.add_movement(MovementSignal {
                                 layer: PriorityLayer::Reflex,
@@ -377,7 +298,6 @@ impl App {
 
                         let final_input_state = self.arbiter.resolve();
 
-                        // Send resolved state to plugin via VTable
                         unsafe {
                             (game_plugin.api.update)(
                                 game_plugin.api.state,

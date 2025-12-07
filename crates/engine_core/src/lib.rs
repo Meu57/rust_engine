@@ -5,6 +5,8 @@
 pub mod app;
 pub mod input;
 pub mod inspector; // <--- New Module
+pub mod host;   // <--- NEW
+pub mod scene;  // <--- NEW
 
 // Internal Implementation Modules
 mod hot_reload;
