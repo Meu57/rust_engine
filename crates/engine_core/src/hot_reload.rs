@@ -10,6 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_shared::{PluginApi, ENGINE_API_VERSION, calculate_layout_hash};
 
+/// Must match the plugin's MYGAME_LAYOUT_ID
+/// (see crates/game_plugin/src/lib.rs)
+const MYGAME_LAYOUT_ID: &str = "MyGame_v1";
+
 pub struct GamePlugin {
     pub api: PluginApi,
     _lib: Library,        // keep library alive for the lifetime of the plugin
@@ -72,18 +76,16 @@ impl GamePlugin {
 
         let api = create_func();
 
-        // 5. STRUCTURAL HASH HANDSHAKE (Advanced Safety)
+        // 5. STRUCTURAL HASH HANDSHAKE (Snapshot Layout)
         //
-        // We ensure the Plugin and Host agree on the definition of shared structs.
-        // For now, we validate "InputState". In a real engine, you'd extend this
-        // to all shared types.
-        let host_hash = calculate_layout_hash("InputState");
+        // Host and Plugin must agree on the MyGame snapshot layout ID.
+        let host_hash = calculate_layout_hash(MYGAME_LAYOUT_ID);
         let plugin_hash = (api.get_layout_hash)();
 
         if host_hash != plugin_hash {
             return Err(format!(
                 "CRITICAL: Layout Mismatch! Host expects hash 0x{:X}, Plugin provided 0x{:X}. \
-                 This means 'InputState' (or other shared layout) differs. Recompile engine + plugin.",
+                 This means the MyGame snapshot layout differs. Recompile engine + plugin.",
                 host_hash, plugin_hash
             ).into());
         }
