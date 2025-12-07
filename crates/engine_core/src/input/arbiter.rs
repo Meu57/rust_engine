@@ -156,10 +156,16 @@ impl Arbiter {
     fn resolve_movement(&self, global_permission: u64) -> Vec2 {
         use engine_shared::input_types::canonical_actions::*;
 
+        // Broad-phase veto: if ALL movement bits are suppressed, skip work.
+        if (global_permission & channels::MASK_MOVE) == 0 {
+            return Vec2::ZERO;
+        }
+
         if self.move_signals.is_empty() {
             return Vec2::ZERO;
         }
 
+        // Winner-takes-all by highest-priority layer that has movement.
         let mut winning_layer: Option<PriorityLayer> = None;
         for cfg in &self.layer_configs {
             if self
@@ -173,6 +179,7 @@ impl Arbiter {
         }
 
         let Some(layer) = winning_layer else { return Vec2::ZERO; };
+
         let mut raw = Vec2::ZERO;
         for sig in &self.move_signals {
             if sig.layer == layer {
@@ -181,6 +188,7 @@ impl Arbiter {
         }
 
         let mut final_vec = raw;
+
         // Clamp axis components if specific direction bits are suppressed
         if (global_permission & (1 << MOVE_RIGHT)) == 0 && final_vec.x > 0.0 {
             final_vec.x = 0.0;
@@ -195,6 +203,7 @@ impl Arbiter {
             final_vec.y = 0.0;
         }
 
+        // Deadzone after suppression
         if final_vec.x.abs() < self.deadzone {
             final_vec.x = 0.0;
         }
@@ -206,6 +215,7 @@ impl Arbiter {
         if len_sq > 1.0 {
             final_vec /= len_sq.sqrt();
         }
+
         final_vec
     }
 }

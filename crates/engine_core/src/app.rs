@@ -19,7 +19,7 @@ use crate::host;
 use crate::gui::GuiSystem;
 use crate::plugin_manager::{PluginManager, PluginRuntimeState};
 
-use engine_shared::input_types::{PriorityLayer, canonical_actions};
+use engine_shared::input_types::{PriorityLayer, canonical_actions, ActionId, InputState};
 use engine_ecs::World;
 
 pub struct App {
@@ -28,6 +28,13 @@ pub struct App {
     arbiter: Arbiter,
     window_title: String,
     gui: GuiSystem,
+
+    // Engine actions routed through the Arbiter
+    engine_toggle_inspector: ActionId,
+    engine_request_hot_reload: ActionId,
+
+    // NEW: store previous frame's input for edge detection
+    last_input_state: InputState,
 }
 
 impl App {
@@ -35,7 +42,7 @@ impl App {
         let mut registry = ActionRegistry::default();
         let mut input_map = InputMap::default();
 
-        // 1. Register canonical actions FIRST to guarantee IDs 0..3
+        // 1. Register canonical movement actions FIRST to guarantee IDs 0..3
         let move_up = registry.register("MoveUp");
         let move_down = registry.register("MoveDown");
         let move_left = registry.register("MoveLeft");
@@ -50,9 +57,18 @@ impl App {
         input_map.bind_logical(KeyCode::KeyA, move_left);
         input_map.bind_logical(KeyCode::KeyD, move_right);
 
+        // 2. Register Engine actions as first-class actions
+        let engine_toggle_inspector = registry.register("Engine.ToggleInspector");
+        let engine_request_hot_reload = registry.register("Engine.RequestHotReload");
+
+        // Bind F1/F5 to engine actions instead of hardcoding them
+        input_map.bind_logical(KeyCode::F1, engine_toggle_inspector);
+        input_map.bind_logical(KeyCode::F5, engine_request_hot_reload);
+
+        // Publish registry globally for plugins / tools
         let _ = input::GLOBAL_REGISTRY.set(Mutex::new(registry.clone()));
 
-        // 2. Configure Arbiter
+        // 3. Configure Arbiter layers
         let layers = vec![
             LayerConfig {
                 layer: PriorityLayer::Reflex,
@@ -88,6 +104,12 @@ impl App {
             arbiter,
             window_title: "Rust Engine: Modular Architecture".to_string(),
             gui: GuiSystem::new(),
+
+            engine_toggle_inspector,
+            engine_request_hot_reload,
+
+            // start with no actions pressed
+            last_input_state: InputState::default(),
         }
     }
 
@@ -125,15 +147,7 @@ impl App {
                         WindowEvent::CloseRequested => elwt.exit(),
 
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
-                            if key_event.state == ElementState::Pressed {
-                                if let PhysicalKey::Code(KeyCode::F1) = key_event.physical_key {
-                                    self.gui.toggle_inspector();
-                                }
-                                if let PhysicalKey::Code(KeyCode::F5) = key_event.physical_key {
-                                    plugin_manager.try_hot_reload(&mut world, &host_interface);
-                                }
-                            }
-
+                            // NOTE: F1/F5 now go through input_map/arbiter only.
                             if self.gui.wants_keyboard_input() {
                                 return;
                             }
@@ -173,10 +187,33 @@ impl App {
                             });
                             self.gui.show_inspector = inspector_open;
 
-                            let _ = renderer.render(
+                            // --- Phase 2: robust SurfaceError handling ---
+                            match renderer.render(
                                 &world,
                                 Some((&self.gui.ctx, &primitives, &textures_delta)),
-                            );
+                            ) {
+                                Ok(()) => {
+                                    // all good
+                                }
+                                Err(wgpu::SurfaceError::Lost)
+                                | Err(wgpu::SurfaceError::Outdated) => {
+                                    // Surface was lost or outdated (e.g., window resize, alt-tab).
+                                    // Reconfigure swapchain and continue.
+                                    eprintln!(
+                                        "[Renderer] Surface lost/outdated. Reconfiguring swapchain."
+                                    );
+                                    renderer.resize(window.inner_size());
+                                }
+                                Err(wgpu::SurfaceError::OutOfMemory) => {
+                                    // This is a *fatal* error. Continuing would be undefined behavior.
+                                    eprintln!("[Renderer] FATAL: Out of GPU memory. Exiting.");
+                                    elwt.exit();
+                                }
+                                Err(wgpu::SurfaceError::Timeout) => {
+                                    // Non-fatal; just log and keep going.
+                                    eprintln!("[Renderer] Surface timeout. Skipping this frame.");
+                                }
+                            }
                         }
                         _ => (),
                     },
@@ -185,6 +222,7 @@ impl App {
                         let dt = 1.0 / 60.0;
                         self.arbiter.clear();
 
+                        // 1. Convert active_keys → logical actions via InputMap
                         for &key in &active_keys {
                             let physical = PhysicalKey::Code(key);
                             if let Some(action_id) =
@@ -198,17 +236,42 @@ impl App {
                             }
                         }
 
+                        // Optional: Reflex test
                         if active_keys.contains(&KeyCode::KeyP) {
                             self.arbiter.add_movement(MovementSignal {
                                 layer: PriorityLayer::Reflex,
                                 vector: Vec2::ZERO,
                                 weight: 1.0,
                             });
-                            // Reflex also suppresses via layer config
+                            // Reflex suppression is handled by layer config.
                         }
 
+                        // 2. Let arbiter resolve final InputState
                         let final_input_state = self.arbiter.resolve();
+
+                        // 3. ENGINE ACTIONS — edge-triggered
+                        let toggle_now =
+                            final_input_state.is_active(self.engine_toggle_inspector)
+                            && !self.last_input_state.is_active(self.engine_toggle_inspector);
+
+                        let reload_now =
+                            final_input_state.is_active(self.engine_request_hot_reload)
+                            && !self.last_input_state.is_active(self.engine_request_hot_reload);
+
+                        if toggle_now {
+                            self.gui.toggle_inspector();
+                        }
+
+                        if reload_now {
+                            plugin_manager.try_hot_reload(&mut world, &host_interface);
+                        }
+
+                        // 4. Forward input to plugin/game
                         plugin_manager.update(&mut world, &final_input_state, dt);
+
+                        // 5. Update last_input_state for next frame
+                        self.last_input_state = final_input_state;
+
                         window.request_redraw();
                     }
                     _ => (),
