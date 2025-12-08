@@ -34,7 +34,8 @@ impl<'a> FrameGraph<'a> {
         gui_renderer: &mut egui_wgpu::Renderer,
         inputs: FrameInputs<'a>,
     ) -> Result<FrameOutputs, wgpu::SurfaceError> {
-        // Acquire the backbuffer
+        // Acquire the backbuffer. Any surface loss / timeout / etc.
+        // is reported via the SurfaceError and handled at the App level.
         let output = self.ctx.surface.get_current_texture()?;
         let view = output
             .texture
@@ -51,12 +52,16 @@ impl<'a> FrameGraph<'a> {
         // ---------------------------------------------------------------------
         // 1. Game / Sprite pass
         // ---------------------------------------------------------------------
+        encoder.push_debug_group("SpritePass");
         sprite_pass.draw(self.ctx, &mut encoder, &view, inputs.world);
+        encoder.pop_debug_group();
 
         // ---------------------------------------------------------------------
         // 2. GUI pass (reusing your existing logic)
         // ---------------------------------------------------------------------
         if let Some((ctx, primitives, delta)) = inputs.gui {
+            encoder.push_debug_group("GuiPass");
+
             // Upload textures set this frame
             for (id, image_delta) in &delta.set {
                 gui_renderer.update_texture(
@@ -84,17 +89,15 @@ impl<'a> FrameGraph<'a> {
                 let mut gui_pass =
                     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Gui Render Pass"),
-                        color_attachments: &[Some(
-                            wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    // Load the result of the sprite pass
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                // Load the result of the sprite pass
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
                             },
-                        )],
+                        })],
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
@@ -107,6 +110,8 @@ impl<'a> FrameGraph<'a> {
             for id in &delta.free {
                 gui_renderer.free_texture(id);
             }
+
+            encoder.pop_debug_group();
         }
 
         // Submit work and present

@@ -68,7 +68,7 @@ pub struct HostInterface {
 pub struct PluginApi {
     pub state: *mut c_void,
 
-    // Lifecycle using specific types
+    // Lifecycle
     pub on_load: extern "C" fn(
         state: *mut c_void,
         host_ctx: *mut HostContext,
@@ -84,11 +84,16 @@ pub struct PluginApi {
 
     pub on_unload: extern "C" fn(state: *mut c_void, host_ctx: *mut HostContext) -> FFIResult,
 
-    // State Management
+    // State management
     pub get_state_len: extern "C" fn(state: *mut c_void) -> usize,
     pub save_state: extern "C" fn(state: *mut c_void, buffer: FFIBuffer) -> FFIResult,
     pub load_state: extern "C" fn(state: *mut c_void, buffer: FFIBuffer) -> FFIResult,
 
     pub drop_state: extern "C" fn(state: *mut c_void),
+
+    /// Structural hash for schema layout.
     pub get_schema_hash: extern "C" fn() -> u64,
+
+    /// Exposes the current state version from the plugin.
+    pub get_state_version: extern "C" fn() -> u32,
 }

@@ -1,9 +1,10 @@
 // crates/engine_core/src/renderer/mod.rs
+
 pub mod context;
 pub mod types;
 pub mod sprite_pass;
 mod resources;
-mod frame_graph; // <-- NEW
+mod frame_graph;
 
 pub use resources::RenderResources;
 

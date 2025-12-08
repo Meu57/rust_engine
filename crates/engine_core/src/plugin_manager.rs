@@ -87,7 +87,6 @@ impl PluginManager {
                     PluginRuntimeState::PausedError("Panic during update".into());
             }
             other => {
-                // Non-success from update is unusual but we log and keep running.
                 eprintln!("⚠️ Plugin on_update returned {:?}", other);
             }
         }
@@ -154,7 +153,7 @@ impl PluginManager {
 
         println!("🔄 Hot Reload requested...");
 
-        // 1. SAVE STATE
+        // 1. SAVE STATE (if currently running)
         let snapshot = if matches!(self.runtime_state, PluginRuntimeState::Running) {
             self.save_plugin_state()
         } else {
@@ -165,9 +164,7 @@ impl PluginManager {
         unsafe {
             (self.plugin.api.drop_state)(self.plugin.api.state);
         }
-        // dropping PluginHandle when we overwrite self.plugin
         let old_path = self.plugin.path.clone();
-        // Clean up temp file
         let _ = fs::remove_file(&old_path);
 
         // 3. LOAD NEW
@@ -182,7 +179,7 @@ impl PluginManager {
         };
         self.plugin = new_plugin;
 
-        // 4. RESTORE STATE
+        // 4. RESTORE STATE (Version + Hash guarded)
         if let Some(mut bytes) = snapshot {
             if !bytes.is_empty() && bytes.len() >= std::mem::size_of::<StateEnvelope>() {
                 let header_size = std::mem::size_of::<StateEnvelope>();
@@ -202,35 +199,58 @@ impl PluginManager {
                 }
 
                 if envelope.magic_header == SNAPSHOT_MAGIC_HEADER {
-                    let ffi_buffer = FFIBuffer {
-                        ptr: bytes.as_mut_ptr(),
-                        len: bytes.len(),
-                    };
-                    let res = (self.plugin.api.load_state)(self.plugin.api.state, ffi_buffer);
+                    let expected_version = (self.plugin.api.get_state_version)();
+                    let expected_hash = (self.plugin.api.get_schema_hash)();
 
-                    match res {
-                        FFIResult::Success => {
-                            println!("✅ State restored successfully.");
-                        }
-                        FFIResult::SchemaMismatch => {
-                            eprintln!(
-                                "⚠️ Schema mismatch during load_state. Using default state."
-                            );
-                        }
-                        FFIResult::PanicDetected => {
-                            eprintln!(
-                                "❌ Plugin PANIC during load_state. Entering PausedError."
-                            );
-                            self.runtime_state = PluginRuntimeState::PausedError(
-                                "Panic during load_state".into(),
-                            );
-                            return false;
-                        }
-                        other => {
-                            eprintln!(
-                                "⚠️ load_state failed ({:?}). Using default state.",
-                                other
-                            );
+                    if envelope.state_version != expected_version {
+                        // Case A: explicit version mismatch → discard
+                        eprintln!(
+                            "⚠️ Version mismatch (Saved: {}, New: {}). Discarding state.",
+                            envelope.state_version, expected_version
+                        );
+                    } else if envelope.schema_hash != expected_hash {
+                        // Case B: hash mismatch but version equal → likely forgot to bump version
+                        eprintln!(
+                            "🛑 CRITICAL SAFETY: Schema hash mismatch! \
+                             Versions match ({}), but layout differs. Using default state.",
+                            envelope.state_version
+                        );
+                    } else {
+                        // Case C: version + hash agree → attempt restore
+                        let ffi_buffer = FFIBuffer {
+                            ptr: bytes.as_mut_ptr(),
+                            len: bytes.len(),
+                        };
+
+                        let res = (self.plugin.api.load_state)(
+                            self.plugin.api.state,
+                            ffi_buffer,
+                        );
+
+                        match res {
+                            FFIResult::Success => {
+                                println!("✅ State restored successfully.");
+                            }
+                            FFIResult::SchemaMismatch => {
+                                eprintln!(
+                                    "⚠️ Schema mismatch reported by plugin. Using default state."
+                                );
+                            }
+                            FFIResult::PanicDetected => {
+                                eprintln!(
+                                    "❌ Plugin PANIC during load_state. Entering PausedError."
+                                );
+                                self.runtime_state = PluginRuntimeState::PausedError(
+                                    "Panic during load_state".into(),
+                                );
+                                return false;
+                            }
+                            other => {
+                                eprintln!(
+                                    "⚠️ load_state failed ({:?}). Using default state.",
+                                    other
+                                );
+                            }
                         }
                     }
                 }
@@ -276,5 +296,6 @@ fn unique_copy_path(original: &Path) -> Result<PathBuf, Box<dyn std::error::Erro
         .and_then(OsStr::to_str)
         .unwrap_or("plugin");
     let ext = original.extension().and_then(OsStr::to_str).unwrap_or("dll");
+
     Ok(original.with_file_name(format!("{stem}_loaded_{ts}.{ext}")))
 }

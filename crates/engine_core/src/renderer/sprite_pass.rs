@@ -1,4 +1,5 @@
 // crates/engine_core/src/renderer/sprite_pass.rs
+
 use std::num::NonZeroU64;
 
 use wgpu::util::{DeviceExt, StagingBelt};
@@ -8,8 +9,8 @@ use engine_shared::{CTransform, CSprite};
 use glam::{Mat4, Vec3};
 
 use super::context::GraphicsContext;
-use super::types::{CameraUniform, InstanceRaw};
 use super::resources::RenderResources;
+use super::types::{CameraUniform, InstanceRaw};
 
 pub struct SpritePass {
     render_pipeline: wgpu::RenderPipeline,
@@ -43,7 +44,11 @@ impl SpritePass {
                     }],
                 });
 
-        // Shader and pipeline
+        // ---------------------------------------------------------------------
+        // Shader + pipeline creation with validation error scope
+        // ---------------------------------------------------------------------
+        ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+
         let shader = ctx
             .device
             .create_shader_module(wgpu::include_wgsl!(
@@ -89,6 +94,12 @@ impl SpritePass {
                     multisample: wgpu::MultisampleState::default(),
                     multiview: None,
                 });
+
+        // Pop error scope and fail loudly if validation failed.
+        let pipeline_error = pollster::block_on(ctx.device.pop_error_scope());
+        if let Some(err) = pipeline_error {
+            panic!("SpritePass pipeline creation failed validation: {:?}", err);
+        }
 
         // Initial instance buffer (placeholder size, will grow dynamically)
         let instance_data = vec![
@@ -189,6 +200,7 @@ impl SpritePass {
             buffer_view.copy_from_slice(instance_bytes);
         }
 
+        // Mark staging buffers ready to be submitted
         self.staging_belt.finish();
 
         {
@@ -223,6 +235,7 @@ impl SpritePass {
     }
 
     pub fn cleanup(&mut self) {
+        // Safe to recall after queue submission (Renderer does this after run()).
         self.staging_belt.recall();
     }
 }
