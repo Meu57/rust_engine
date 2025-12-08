@@ -31,10 +31,20 @@ pub struct ResourceDesc {
     pub alias_group: Option<u32>,
 }
 
+/// What kind of work a pass performs. We match on this instead of raw strings,
+/// but keep the name field for debugging / logging.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PassKind {
+    Sprite,
+    SceneToBackbuffer,
+    Gui,
+}
+
 /// Description of a single render pass in the DAG.
 #[derive(Clone, Debug)]
 pub struct PassDesc {
     pub name: &'static str,
+    pub kind: PassKind,
     /// Resources read by this pass.
     pub reads: &'static [ResourceId],
     /// Resources written by this pass.
@@ -42,10 +52,13 @@ pub struct PassDesc {
 }
 
 /// Static description of the frame graph for this frame.
-/// For now:
-///   - One color target (backbuffer)
-///   - Sprite pass (writes backbuffer)
-///   - GUI pass   (reads + writes backbuffer)
+///
+/// We now have:
+///   - `SceneColor`  (off-screen color target)
+///   - `Backbuffer`  (surface)
+///   - Sprite pass            : writes `SceneColor`
+///   - SceneToBackbuffer pass : reads  `SceneColor`, writes `Backbuffer`
+///   - GUI pass               : reads + writes `Backbuffer`
 #[derive(Clone, Debug)]
 pub struct FrameGraphDesc {
     pub resources: &'static [ResourceDesc],
@@ -77,34 +90,54 @@ pub struct FrameGraph<'a> {
 mod ids {
     use super::ResourceId;
 
-    /// Logical color target for the frame. Currently bound to the surface
-    /// backbuffer, but later this could be an off-screen texture.
-    pub const BACKBUFFER: ResourceId = ResourceId(0);
+    /// Off-screen scene color buffer (render target for SpritePass).
+    pub const SCENE_COLOR: ResourceId = ResourceId(0);
+    /// Final backbuffer (surface texture).
+    pub const BACKBUFFER: ResourceId = ResourceId(1);
 }
 
 /// Static frame graph description for the current pipeline.
 ///
 /// NOTE: All of this is per-frame, but the *topology* is static.
-/// You can later extend this with more resources + passes without
+/// You can extend this with more resources + passes without
 /// changing the outer API.
 fn frame_graph_desc() -> FrameGraphDesc {
     use ids::*;
 
-    const RESOURCES: &[ResourceDesc] = &[ResourceDesc {
-        id: BACKBUFFER,
-        name: "Backbuffer",
-        kind: ResourceKind::Color,
-        alias_group: None, // Could be Some(0) when we introduce aliasable temps.
-    }];
+    // Start using alias_group for SCENE_COLOR. Right now it is the
+    // only member of its group, but this sets the pattern for future
+    // aliasable temporaries.
+    const RESOURCES: &[ResourceDesc] = &[
+        ResourceDesc {
+            id: SCENE_COLOR,
+            name: "SceneColor",
+            kind: ResourceKind::Color,
+            alias_group: Some(0),
+        },
+        ResourceDesc {
+            id: BACKBUFFER,
+            name: "Backbuffer",
+            kind: ResourceKind::Color,
+            alias_group: None, // surface is not aliasable in this design
+        },
+    ];
 
     const PASSES: &[PassDesc] = &[
         PassDesc {
             name: "SpritePass",
+            kind: PassKind::Sprite,
             reads: &[],
+            writes: &[SCENE_COLOR],
+        },
+        PassDesc {
+            name: "SceneToBackbuffer",
+            kind: PassKind::SceneToBackbuffer,
+            reads: &[SCENE_COLOR],
             writes: &[BACKBUFFER],
         },
         PassDesc {
             name: "GuiPass",
+            kind: PassKind::Gui,
             reads: &[BACKBUFFER],
             writes: &[BACKBUFFER],
         },
@@ -126,19 +159,19 @@ impl<'a> FrameGraph<'a> {
         // Build the logical graph description for this frame.
         let desc = frame_graph_desc();
 
-        // Validate the graph before we touch the GPU.
-        // Only in debug builds (no overhead in release).
+        // Validate the graph before we touch the GPU (debug builds only).
         if cfg!(debug_assertions) {
             self.validate_graph(&desc);
         }
 
         // Acquire the backbuffer (physical resource backing our logical BACKBUFFER).
-        // Any surface loss / timeout / etc. is reported via SurfaceError
-        // and handled at the App level.
         let output = self.ctx.surface.get_current_texture()?;
-        let view = output
+        let backbuffer_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Off-screen SceneColor view (physical resource for SCENE_COLOR).
+        let scene_view = &self.ctx.scene_color_view;
 
         // Single command encoder for the frame
         let mut encoder =
@@ -149,16 +182,45 @@ impl<'a> FrameGraph<'a> {
                 });
 
         // Execute passes in the order given by desc.passes.
-        // Later we can reorder based on dependencies; for now the ordering
-        // matches the logical DAG topology (Sprite -> Gui).
         for (pass_index, pass) in desc.passes.iter().enumerate() {
-            match pass.name {
-                "SpritePass" => {
+            match pass.kind {
+                PassKind::Sprite => {
                     encoder.push_debug_group("SpritePass");
-                    sprite_pass.draw(self.ctx, &mut encoder, &view, inputs.world);
+                    // SpritePass now renders into off-screen SceneColor
+                    sprite_pass.draw(self.ctx, &mut encoder, scene_view, inputs.world);
                     encoder.pop_debug_group();
                 }
-                "GuiPass" => {
+
+                PassKind::SceneToBackbuffer => {
+                    encoder.push_debug_group("SceneToBackbuffer");
+
+                    // Full-texture copy: SceneColor → Backbuffer.
+                    // This keeps the composite stage simple while giving us
+                    // a true off-screen scene buffer.
+                    let src = wgpu::ImageCopyTexture {
+                        texture: &self.ctx.scene_color,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    };
+                    let dst = wgpu::ImageCopyTexture {
+                        texture: &output.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    };
+                    let extent = wgpu::Extent3d {
+                        width: self.ctx.config.width,
+                        height: self.ctx.config.height,
+                        depth_or_array_layers: 1,
+                    };
+
+                    encoder.copy_texture_to_texture(src, dst, extent);
+
+                    encoder.pop_debug_group();
+                }
+
+                PassKind::Gui => {
                     if let Some((ctx, primitives, delta)) = inputs.gui {
                         encoder.push_debug_group("GuiPass");
 
@@ -191,10 +253,10 @@ impl<'a> FrameGraph<'a> {
                                     label: Some("Gui Render Pass"),
                                     color_attachments: &[Some(
                                         wgpu::RenderPassColorAttachment {
-                                            view: &view,
+                                            view: &backbuffer_view,
                                             resolve_target: None,
                                             ops: wgpu::Operations {
-                                                // Load the result of the sprite pass
+                                                // Load the result of SceneToBackbuffer copy
                                                 load: wgpu::LoadOp::Load,
                                                 store: wgpu::StoreOp::Store,
                                             },
@@ -215,16 +277,16 @@ impl<'a> FrameGraph<'a> {
 
                         encoder.pop_debug_group();
                     } else {
-                        // GUI pass has no work this frame. This is allowed.
-                        // The graph topology remains valid; we simply skip execution.
+                        // GUI pass has no work this frame; topology is still valid.
                     }
                 }
+
+                // If we ever add a new PassKind but forget to handle it here,
+                // this makes it obvious instead of silently doing nothing.
                 other => {
-                    // For future extension: if we add new passes to the graph
-                    // but forget to handle them here, fail loudly.
                     panic!(
-                        "FrameGraph: pass index {} named '{}' has no execution handler",
-                        pass_index, other
+                        "FrameGraph: unhandled PassKind {:?} (pass index {}, name '{}')",
+                        other, pass_index, pass.name
                     );
                 }
             }
@@ -286,8 +348,7 @@ impl<'a> FrameGraph<'a> {
 
         // Alias-group validation: resources in the same alias_group must not
         // have overlapping lifetimes. This is the foundation for transient
-        // texture aliasing. We enforce it even if we are not yet creating
-        // separate physical allocations.
+        // texture aliasing.
         let mut group_members: HashMap<u32, Vec<(ResourceId, Lifetime, &'static str)>> =
             HashMap::new();
 
