@@ -1,4 +1,3 @@
-// crates/engine_core/src/scene.rs
 use engine_ecs::World;
 use engine_shared::{CEnemy, CPlayer, CSprite, CTransform};
 use glam::Vec2;

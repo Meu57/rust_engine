@@ -1,4 +1,6 @@
-use std::any::TypeId;
+// crates/engine_ecs/src/world.rs
+
+use std::any::{TypeId, type_name};
 use std::collections::HashMap;
 
 use crate::storage::{Storage, SparseSet};
@@ -7,7 +9,7 @@ use crate::entity::Entity;
 pub struct World {
     entities: Vec<Entity>,
     // Map Component Type -> Storage
-    components: HashMap<TypeId, Box<dyn Storage>>, 
+    components: HashMap<TypeId, Box<dyn Storage>>,
     free_indices: Vec<u32>,
     generations: Vec<u32>,
 }
@@ -22,11 +24,22 @@ impl World {
         }
     }
 
+    /// Register a component type with the world.
+    /// This MUST be called exactly once per component type.
     pub fn register_component<T: 'static>(&mut self) {
-        self.components.insert(
-            TypeId::of::<T>(),
-            Box::new(SparseSet::<T>::new()),
-        );
+        let type_id = TypeId::of::<T>();
+
+        if self.components.contains_key(&type_id) {
+            panic!(
+                "Component {} registered twice. \
+                 Ensure you only call world.register_component::<{}>() once.",
+                type_name::<T>(),
+                type_name::<T>(),
+            );
+        }
+
+        self.components
+            .insert(type_id, Box::new(SparseSet::<T>::new()));
     }
 
     pub fn spawn(&mut self) -> Entity {
@@ -43,28 +56,40 @@ impl World {
         entity
     }
 
-    // --- Updated: add_component creates storage on-demand to avoid runtime panic ---
+    /// STRICT MODE: adding a component to an unregistered type is a hard error.
     pub fn add_component<T: 'static>(&mut self, entity: Entity, component: T) {
         use std::collections::hash_map::Entry;
+
         let type_id = TypeId::of::<T>();
 
         match self.components.entry(type_id) {
             Entry::Occupied(mut occ) => {
-                if let Some(sparse_set) = occ.get_mut().as_any_mut().downcast_mut::<SparseSet<T>>() {
-                    sparse_set.insert(entity, component);
-                } else {
-                    panic!("Component storage exists but has unexpected concrete type");
-                }
+                let storage = occ.get_mut();
+                let sparse_set = storage
+                    .as_any_mut()
+                    .downcast_mut::<SparseSet<T>>()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Component storage type mismatch for {}. \
+                             Storage was created for a different concrete type.",
+                            type_name::<T>(),
+                        )
+                    });
+
+                sparse_set.insert(entity, component);
             }
-            Entry::Vacant(vac) => {
-                let mut set = SparseSet::<T>::new();
-                set.insert(entity, component);
-                vac.insert(Box::new(set));
+            Entry::Vacant(_) => {
+                // LOUD FAILURE: this is exactly what we want in a serious engine.
+                panic!(
+                    "Component {} was not registered! \
+                     Call world.register_component::<{}>() during setup (e.g. scene::setup_default_world).",
+                    type_name::<T>(),
+                    type_name::<T>(),
+                );
             }
         }
     }
 
-    // --- NEW: get_component ---
     /// Returns a shared reference to the component `T` for `entity`, or `None` if not present.
     pub fn get_component<T: 'static>(&self, entity: Entity) -> Option<&T> {
         let type_id = TypeId::of::<T>();
@@ -76,17 +101,19 @@ impl World {
         None
     }
 
-    // Get a reference to a specific component storage
+    /// Read-only access to the full storage of a component type.
     pub fn query<T: 'static>(&self) -> Option<&SparseSet<T>> {
         let type_id = TypeId::of::<T>();
-        self.components.get(&type_id)
+        self.components
+            .get(&type_id)
             .and_then(|boxed| boxed.as_any().downcast_ref::<SparseSet<T>>())
     }
 
-    // Get a MUTABLE reference (for modifying data)
+    /// Mutable access to the full storage of a component type.
     pub fn query_mut<T: 'static>(&mut self) -> Option<&mut SparseSet<T>> {
         let type_id = TypeId::of::<T>();
-        self.components.get_mut(&type_id)
+        self.components
+            .get_mut(&type_id)
             .and_then(|boxed| boxed.as_any_mut().downcast_mut::<SparseSet<T>>())
     }
 }
