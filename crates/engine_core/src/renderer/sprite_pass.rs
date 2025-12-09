@@ -11,6 +11,7 @@ use glam::{Mat4, Vec3};
 use super::context::GraphicsContext;
 use super::resources::RenderResources;
 use super::types::{CameraUniform, InstanceRaw};
+use super::frame_graph::{FrameInputs, PassDesc, PassKind, PhysicalResources, RenderPassNode};
 
 pub struct SpritePass {
     render_pipeline: wgpu::RenderPipeline,
@@ -237,5 +238,31 @@ impl SpritePass {
     pub fn cleanup(&mut self) {
         // Safe to recall after queue submission (Renderer does this after run()).
         self.staging_belt.recall();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// RenderPassNode implementation for SpritePass
+// -----------------------------------------------------------------------------
+impl RenderPassNode for SpritePass {
+    fn kind(&self) -> PassKind {
+        PassKind::Sprite
+    }
+
+    fn execute<'a>(
+        &mut self,
+        ctx: &'a GraphicsContext,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &PhysicalResources<'a>,
+        inputs: &FrameInputs<'a>,
+        pass_desc: &PassDesc,
+        _pass_index: usize,
+    ) {
+        encoder.push_debug_group(pass_desc.name);
+
+        // Render into the off-screen scene color view, as before.
+        self.draw(ctx, encoder, resources.scene_color_view, inputs.world);
+
+        encoder.pop_debug_group();
     }
 }

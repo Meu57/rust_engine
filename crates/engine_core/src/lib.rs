@@ -7,6 +7,8 @@ pub mod input;
 pub mod inspector; // <--- New Module
 pub mod host;   // <--- NEW
 pub mod scene;  // <--- NEW
+pub mod engine_loop;
+pub mod platform_runner;
 
 // Internal Implementation Modules
 

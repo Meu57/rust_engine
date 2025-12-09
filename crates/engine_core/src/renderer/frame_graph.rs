@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use engine_ecs::World;
 
 use crate::renderer::context::GraphicsContext;
-use crate::renderer::sprite_pass::SpritePass;
 
 /// Logical resource identifier for this frame.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -79,6 +78,33 @@ pub struct FrameInputs<'a> {
 /// struct so we can add timing/profiling/attachments later.
 pub struct FrameOutputs;
 
+/// Physical resources bound to the logical graph for a single frame.
+/// Passed into each RenderPassNode during execution.
+pub struct PhysicalResources<'a> {
+    pub scene_color_texture: &'a wgpu::Texture,
+    pub scene_color_view: &'a wgpu::TextureView,
+    pub backbuffer_texture: &'a wgpu::Texture,
+    pub backbuffer_view: &'a wgpu::TextureView,
+}
+
+/// Trait for anything that can execute as a node in the frame graph.
+/// Concrete passes (Sprite, GUI, blit, etc.) implement this.
+pub trait RenderPassNode {
+    /// Which logical PassKind this node handles.
+    fn kind(&self) -> PassKind;
+
+    /// Record GPU work for this pass.
+    fn execute<'a>(
+        &mut self,
+        ctx: &'a GraphicsContext,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &PhysicalResources<'a>,
+        inputs: &FrameInputs<'a>,
+        pass_desc: &PassDesc,
+        pass_index: usize,
+    );
+}
+
 /// Minimal frame graph wrapper for your current passes.
 /// Internally uses a small DAG-style description (resources + passes)
 /// with validation hooks for alias groups and lifetime checking.
@@ -150,10 +176,12 @@ fn frame_graph_desc() -> FrameGraphDesc {
 }
 
 impl<'a> FrameGraph<'a> {
+    /// Run the frame graph with a set of concrete RenderPassNodes.
+    /// Each node advertises its PassKind; we match them to the logical
+    /// passes in FrameGraphDesc and call execute() in that order.
     pub fn run(
         &self,
-        sprite_pass: &mut SpritePass,
-        gui_renderer: &mut egui_wgpu::Renderer,
+        passes: &mut [&mut dyn RenderPassNode],
         inputs: FrameInputs<'a>,
     ) -> Result<FrameOutputs, wgpu::SurfaceError> {
         // Build the logical graph description for this frame.
@@ -173,6 +201,13 @@ impl<'a> FrameGraph<'a> {
         // Off-screen SceneColor view (physical resource for SCENE_COLOR).
         let scene_view = &self.ctx.scene_color_view;
 
+        let physical_resources = PhysicalResources {
+            scene_color_texture: &self.ctx.scene_color,
+            scene_color_view: scene_view,
+            backbuffer_texture: &output.texture,
+            backbuffer_view: &backbuffer_view,
+        };
+
         // Single command encoder for the frame
         let mut encoder =
             self.ctx
@@ -183,114 +218,25 @@ impl<'a> FrameGraph<'a> {
 
         // Execute passes in the order given by desc.passes.
         // (Ordering is currently manual but validated for basic data-flow issues.)
-        for (pass_index, pass) in desc.passes.iter().enumerate() {
-            match pass.kind {
-                PassKind::Sprite => {
-                    encoder.push_debug_group("SpritePass");
-                    // SpritePass now renders into off-screen SceneColor
-                    sprite_pass.draw(self.ctx, &mut encoder, scene_view, inputs.world);
-                    encoder.pop_debug_group();
-                }
-
-                PassKind::SceneToBackbuffer => {
-                    encoder.push_debug_group("SceneToBackbuffer");
-
-                    // Full-texture copy: SceneColor → Backbuffer.
-                    // This keeps the composite stage simple while giving us
-                    // a true off-screen scene buffer.
-                    let src = wgpu::ImageCopyTexture {
-                        texture: &self.ctx.scene_color,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    };
-                    let dst = wgpu::ImageCopyTexture {
-                        texture: &output.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    };
-                    let extent = wgpu::Extent3d {
-                        width: self.ctx.config.width,
-                        height: self.ctx.config.height,
-                        depth_or_array_layers: 1,
-                    };
-
-                    encoder.copy_texture_to_texture(src, dst, extent);
-
-                    encoder.pop_debug_group();
-                }
-
-                PassKind::Gui => {
-                    if let Some((ctx, primitives, delta)) = inputs.gui {
-                        encoder.push_debug_group("GuiPass");
-
-                        // Upload textures set this frame
-                        for (id, image_delta) in &delta.set {
-                            gui_renderer.update_texture(
-                                &self.ctx.device,
-                                &self.ctx.queue,
-                                *id,
-                                image_delta,
-                            );
-                        }
-
-                        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-                            size_in_pixels: [self.ctx.config.width, self.ctx.config.height],
-                            pixels_per_point: ctx.pixels_per_point(),
-                        };
-
-                        gui_renderer.update_buffers(
-                            &self.ctx.device,
-                            &self.ctx.queue,
-                            &mut encoder,
-                            primitives,
-                            &screen_descriptor,
-                        );
-
-                        {
-                            let mut gui_pass =
-                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("Gui Render Pass"),
-                                    color_attachments: &[Some(
-                                        wgpu::RenderPassColorAttachment {
-                                            view: &backbuffer_view,
-                                            resolve_target: None,
-                                            ops: wgpu::Operations {
-                                                // Load the result of SceneToBackbuffer copy
-                                                load: wgpu::LoadOp::Load,
-                                                store: wgpu::StoreOp::Store,
-                                            },
-                                        },
-                                    )],
-                                    depth_stencil_attachment: None,
-                                    timestamp_writes: None,
-                                    occlusion_query_set: None,
-                                });
-
-                            gui_renderer.render(&mut gui_pass, primitives, &screen_descriptor);
-                        }
-
-                        // Free any textures that egui asked us to drop
-                        for id in &delta.free {
-                            gui_renderer.free_texture(id);
-                        }
-
-                        encoder.pop_debug_group();
-                    } else {
-                        // GUI pass has no work this frame; topology is still valid.
-                    }
-                }
-
-                // If we ever add a new PassKind but forget to handle it here,
-                // this makes it obvious instead of silently doing nothing.
-                other => {
+        for (pass_index, pass_desc) in desc.passes.iter().enumerate() {
+            let node = passes
+                .iter_mut()
+                .find(|node| node.kind() == pass_desc.kind)
+                .unwrap_or_else(|| {
                     panic!(
-                        "FrameGraph: unhandled PassKind {:?} (pass index {}, name '{}')",
-                        other, pass_index, pass.name
-                    );
-                }
-            }
+                        "FrameGraph: no RenderPassNode registered for {:?} (pass index {}, name '{}')",
+                        pass_desc.kind, pass_index, pass_desc.name
+                    )
+                });
+
+            node.execute(
+                self.ctx,
+                &mut encoder,
+                &physical_resources,
+                &inputs,
+                pass_desc,
+                pass_index,
+            );
         }
 
         // Submit work and present
@@ -462,5 +408,55 @@ impl<'a> FrameGraph<'a> {
         }
 
         // If we get here, the logical graph is structurally sound for this frame.
+    }
+}
+
+/// Small node that performs the SceneColor → Backbuffer blit.
+/// Kept here because it is tightly coupled to the frame graph topology.
+pub struct SceneToBackbufferPass;
+
+impl RenderPassNode for SceneToBackbufferPass {
+    fn kind(&self) -> PassKind {
+        PassKind::SceneToBackbuffer
+    }
+
+    fn execute<'a>(
+        &mut self,
+        ctx: &'a GraphicsContext,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &PhysicalResources<'a>,
+        _inputs: &FrameInputs<'a>,
+        pass_desc: &PassDesc,
+        pass_index: usize,
+    ) {
+        // Keep debug group labels consistent with original implementation.
+        encoder.push_debug_group(pass_desc.name);
+
+        // Full-texture copy: SceneColor → Backbuffer.
+        let src = wgpu::ImageCopyTexture {
+            texture: resources.scene_color_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        };
+        let dst = wgpu::ImageCopyTexture {
+            texture: resources.backbuffer_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        };
+        let extent = wgpu::Extent3d {
+            width: ctx.config.width,
+            height: ctx.config.height,
+            depth_or_array_layers: 1,
+        };
+
+        encoder.copy_texture_to_texture(src, dst, extent);
+
+        encoder.pop_debug_group();
+
+        // If topology changes and this pass stops matching the logical config,
+        // validate_graph will catch it before we ever execute.
+        let _ = pass_index; // currently unused, preserved for future diagnostics.
     }
 }

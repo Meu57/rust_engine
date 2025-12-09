@@ -9,3 +9,9 @@ pub use registry::ActionRegistry;
 pub use map::InputMap;
 pub use arbiter::Arbiter;
 pub use ffi::{host_get_action_id, GLOBAL_REGISTRY};
+pub mod config;
+pub mod poller;
+// plus whatever you already had: registry, map, ffi, etc.
+
+pub use arbiter::{LayerConfig, MovementSignal, ActionSignal};
+
