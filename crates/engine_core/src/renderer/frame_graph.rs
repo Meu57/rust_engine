@@ -182,6 +182,7 @@ impl<'a> FrameGraph<'a> {
                 });
 
         // Execute passes in the order given by desc.passes.
+        // (Ordering is currently manual but validated for basic data-flow issues.)
         for (pass_index, pass) in desc.passes.iter().enumerate() {
             match pass.kind {
                 PassKind::Sprite => {
@@ -304,6 +305,8 @@ impl<'a> FrameGraph<'a> {
     /// - Ensure resource IDs referenced by passes exist.
     /// - Compute simple lifetimes (first/last pass index per resource).
     /// - Enforce alias-group safety (if/when alias_group is used).
+    /// - Ensure that any resource which is written and then read is not
+    ///   read *before* its first write in the declared pass order.
     fn validate_graph(&self, desc: &FrameGraphDesc) {
         // Map ResourceId -> index in desc.resources
         let mut resource_index: HashMap<ResourceId, usize> = HashMap::new();
@@ -325,24 +328,89 @@ impl<'a> FrameGraph<'a> {
 
         let mut lifetimes: HashMap<ResourceId, Lifetime> = HashMap::new();
 
+        // Track first read and first write index per resource (by pass order).
+        let mut first_read: HashMap<ResourceId, usize> = HashMap::new();
+        let mut first_write: HashMap<ResourceId, usize> = HashMap::new();
+
+        // Helper to update lifetime for any access (read or write).
+        fn bump_lifetime(
+            lifetimes: &mut HashMap<ResourceId, Lifetime>,
+            rid: ResourceId,
+            pass_idx: usize,
+        ) {
+            lifetimes
+                .entry(rid)
+                .and_modify(|lt| {
+                    if pass_idx < lt.first {
+                        lt.first = pass_idx;
+                    }
+                    if pass_idx > lt.last {
+                        lt.last = pass_idx;
+                    }
+                })
+                .or_insert(Lifetime {
+                    first: pass_idx,
+                    last: pass_idx,
+                });
+        }
+
         for (pass_idx, pass) in desc.passes.iter().enumerate() {
-            for &rid in pass.reads.iter().chain(pass.writes.iter()) {
+            // Reads
+            for &rid in pass.reads {
                 let _ = resource_index.get(&rid).unwrap_or_else(|| {
                     panic!(
-                        "FrameGraph validation error: pass '{}' references unknown resource {:?}",
+                        "FrameGraph validation error: pass '{}' references unknown resource {:?} (read)",
                         pass.name, rid
                     )
                 });
 
-                lifetimes
+                bump_lifetime(&mut lifetimes, rid, pass_idx);
+
+                first_read
                     .entry(rid)
-                    .and_modify(|lt| {
-                        lt.last = pass_idx.max(lt.last);
+                    .and_modify(|idx| {
+                        if pass_idx < *idx {
+                            *idx = pass_idx;
+                        }
                     })
-                    .or_insert(Lifetime {
-                        first: pass_idx,
-                        last: pass_idx,
-                    });
+                    .or_insert(pass_idx);
+            }
+
+            // Writes
+            for &rid in pass.writes {
+                let _ = resource_index.get(&rid).unwrap_or_else(|| {
+                    panic!(
+                        "FrameGraph validation error: pass '{}' references unknown resource {:?} (write)",
+                        pass.name, rid
+                    )
+                });
+
+                bump_lifetime(&mut lifetimes, rid, pass_idx);
+
+                first_write
+                    .entry(rid)
+                    .and_modify(|idx| {
+                        if pass_idx < *idx {
+                            *idx = pass_idx;
+                        }
+                    })
+                    .or_insert(pass_idx);
+            }
+        }
+
+        // Additional validation: any resource that is written and read in this graph
+        // must not be read before its first write according to the declared pass order.
+        for (&rid, &write_idx) in &first_write {
+            if let Some(&read_idx) = first_read.get(&rid) {
+                if read_idx < write_idx {
+                    let r = &desc.resources[resource_index[&rid]];
+                    panic!(
+                        "FrameGraph validation error: resource {:?} ('{}') is first READ in pass index {} \
+                         but first WRITE occurs later at pass index {}. \
+                         Reorder your passes so writes happen before reads.",
+                        rid, r.name, read_idx, write_idx
+                    );
+                }
             }
         }
 
