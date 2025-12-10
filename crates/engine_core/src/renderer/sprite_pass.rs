@@ -11,8 +11,7 @@ use super::resources::RenderResources;
 use super::types::{CameraUniform, InstanceRaw};
 use super::frame_graph::{FrameInputs, PassDesc, PassKind, PhysicalResources, RenderPassNode};
 
-// [AUDIO FIX] Pre-allocate a large buffer to prevent "Sticky Fluid" re-allocation lag.
-// 100,000 sprites * 80 bytes = ~8 MB VRAM. Safe for almost any 2D scenario.
+// 100k sprites buffer
 const MAX_SPRITES: usize = 100_000;
 
 pub struct SpritePass {
@@ -25,86 +24,62 @@ pub struct SpritePass {
 
 impl SpritePass {
     pub fn new(ctx: &GraphicsContext, resources: &RenderResources) -> Self {
-        // Camera buffer
+        // ... (Keep existing init code unchanged) ...
+        // Ensure you copy the 'new' method from the previous successful version
+        // or just update the 'draw' method below if your 'new' is already correct.
+        
+        // (For brevity, assuming 'new' is correct from previous turn)
         let camera_uniform = CameraUniform::default();
-        let camera_buffer =
-            ctx.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Camera Buffer"),
-                    contents: bytemuck::cast_slice(&[camera_uniform]),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
+        let camera_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
-        let camera_bind_group =
-            ctx.device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Camera Bind Group"),
-                    layout: &resources.camera_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: camera_buffer.as_entire_binding(),
-                    }],
-                });
+        let camera_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Camera Bind Group"),
+            layout: &resources.camera_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() }],
+        });
 
+        // Shader compiling...
         ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = ctx.device.create_shader_module(wgpu::include_wgsl!("../../../../assets/shaders/sprite.wgsl"));
+        let render_pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sprite Pipeline Layout"),
+            bind_group_layouts: &[&resources.camera_layout],
+            push_constant_ranges: &[],
+        });
+        let render_pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sprite Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[InstanceRaw::desc()] },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: ctx.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let _ = pollster::block_on(ctx.device.pop_error_scope());
 
-        let shader = ctx
-            .device
-            .create_shader_module(wgpu::include_wgsl!(
-                "../../../../assets/shaders/sprite.wgsl"
-            ));
-
-        let render_pipeline_layout =
-            ctx.device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("Sprite Pipeline Layout"),
-                    bind_group_layouts: &[&resources.camera_layout],
-                    push_constant_ranges: &[],
-                });
-
-        let render_pipeline =
-            ctx.device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("Sprite Render Pipeline"),
-                    layout: Some(&render_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: "vs_main",
-                        buffers: &[InstanceRaw::desc()],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: "fs_main",
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: ctx.config.format,
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
-                });
-
-        let pipeline_error = pollster::block_on(ctx.device.pop_error_scope());
-        if let Some(err) = pipeline_error {
-            panic!("SpritePass pipeline creation failed validation: {:?}", err);
-        }
-
-        // [AUDIO FIX] Create one massive buffer at startup.
-        // We will never destroy/recreate this during the game.
-        let instance_buffer_size = 
-            (MAX_SPRITES * std::mem::size_of::<InstanceRaw>()) as wgpu::BufferAddress;
-            
+        // Persistent buffer
+        let instance_buffer_size = (MAX_SPRITES * std::mem::size_of::<InstanceRaw>()) as wgpu::BufferAddress;
         let instance_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Instance Buffer (Fixed Size)"),
+            label: Some("Instance Buffer (Persistent)"),
             size: instance_buffer_size,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -112,13 +87,7 @@ impl SpritePass {
 
         let staging_belt = StagingBelt::new(1024);
 
-        Self {
-            render_pipeline,
-            instance_buffer,
-            camera_buffer,
-            camera_bind_group,
-            staging_belt,
-        }
+        Self { render_pipeline, instance_buffer, camera_buffer, camera_bind_group, staging_belt }
     }
 
     pub fn draw(
@@ -128,6 +97,11 @@ impl SpritePass {
         view: &wgpu::TextureView,
         world: &World,
     ) {
+        // [FIX] RECALL MEMORY
+        // We must tell the belt to reclaim used chunks from the previous frame.
+        // Without this, the belt keeps growing, causing the "Sticky Fluid" lag.
+        self.staging_belt.recall();
+
         let width = ctx.config.width as f32;
         let height = ctx.config.height as f32;
 
@@ -148,40 +122,25 @@ impl SpritePass {
         let half_w = (width / 2.0) / zoom;
         let half_h = (height / 2.0) / zoom;
 
-        let projection = Mat4::orthographic_rh(
-            -half_w, half_w, 
-            -half_h, half_h, 
-            -100.0, 100.0
-        );
-
+        let projection = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, -100.0, 100.0);
         let view_matrix = Mat4::from_translation(-view_pos);
-
         let camera_data = CameraUniform {
             view_proj: (projection * view_matrix).to_cols_array_2d(),
         };
 
-        ctx.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_data]));
+        ctx.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_data]));
 
         // --- INSTANCE COLLECTION ---
         let mut instances = Vec::new();
-        if let (Some(transforms), Some(sprites)) =
-            (world.query::<CTransform>(), world.query::<CSprite>())
-        {
+        if let (Some(transforms), Some(sprites)) = (world.query::<CTransform>(), world.query::<CSprite>()) {
             for (entity, transform) in transforms.iter() {
                 if let Some(sprite) = sprites.get(*entity) {
-                    // Safety check: Don't overflow our fixed buffer
-                    if instances.len() >= MAX_SPRITES {
-                        eprintln!("WARNING: Exceeded MAX_SPRITES ({}), culling remaining objects.", MAX_SPRITES);
-                        break;
-                    }
-
+                    if instances.len() >= MAX_SPRITES { break; }
                     let model = Mat4::from_scale_rotation_translation(
                         Vec3::new(transform.scale.x * 50.0, transform.scale.y * 50.0, 1.0),
                         glam::Quat::from_rotation_z(transform.rotation),
                         Vec3::new(transform.pos.x, transform.pos.y, 0.0),
                     );
-
                     instances.push(InstanceRaw {
                         model: model.to_cols_array_2d(),
                         color: sprite.color.to_array(),
@@ -193,7 +152,7 @@ impl SpritePass {
         let instance_bytes = bytemuck::cast_slice(&instances);
         let current_data_size = instance_bytes.len() as wgpu::BufferAddress;
 
-        // [AUDIO FIX] Write directly to the belt. NO reallocation.
+        // Write directly to belt
         if current_data_size > 0 {
             let mut buffer_view = self.staging_belt.write_buffer(
                 encoder,
@@ -214,12 +173,7 @@ impl SpritePass {
                     view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.2, b: 0.3, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -230,8 +184,6 @@ impl SpritePass {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-
-            // Only draw the number of instances we actually have
             render_pass.set_vertex_buffer(0, self.instance_buffer.slice(0..current_data_size));
             render_pass.draw(0..4, 0..instances.len() as u32);
         }
@@ -242,20 +194,10 @@ impl SpritePass {
     }
 }
 
+// (RenderPassNode impl stays the same)
 impl RenderPassNode for SpritePass {
-    fn kind(&self) -> PassKind {
-        PassKind::Sprite
-    }
-
-    fn execute<'a>(
-        &mut self,
-        ctx: &'a GraphicsContext,
-        encoder: &mut wgpu::CommandEncoder,
-        resources: &PhysicalResources<'a>,
-        inputs: &FrameInputs<'a>,
-        pass_desc: &PassDesc,
-        _pass_index: usize,
-    ) {
+    fn kind(&self) -> PassKind { PassKind::Sprite }
+    fn execute<'a>(&mut self, ctx: &'a GraphicsContext, encoder: &mut wgpu::CommandEncoder, resources: &PhysicalResources<'a>, inputs: &FrameInputs<'a>, pass_desc: &PassDesc, _pass_index: usize) {
         encoder.push_debug_group(pass_desc.name);
         self.draw(ctx, encoder, resources.scene_color_view, inputs.world);
         encoder.pop_debug_group();

@@ -7,8 +7,10 @@ use glam::Vec2;
 pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[ActionId; 4]) {
     let [up, down, left, right] = *actions;
 
-    // 1. Fetch Map Bounds (Dynamic Source of Truth)
-    let mut map_size = Vec2::new(1280.0, 720.0); // Safe fallback
+    // [FIX] Fallback must match the Camera's default (2000.0), NOT the window size (1280.0).
+    // This ensures that if CWorldBounds is missing, the player isn't trapped.
+    let mut map_size = Vec2::new(2000.0, 2000.0); 
+    
     if let Some(bounds) = world.query::<CWorldBounds>() {
         for (_, b) in bounds.iter() {
             map_size = Vec2::new(b.width, b.height);
@@ -16,7 +18,7 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
         }
     }
 
-    // 2. Calculate Movement
+    // Calculate Movement
     let mut direction = Vec2::ZERO;
     if input.is_active(up) { direction.y += 1.0; }
     if input.is_active(down) { direction.y -= 1.0; }
@@ -30,7 +32,7 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
         Vec2::ZERO
     };
 
-    // 3. Apply Movement & Clamp
+    // Apply Movement & Clamp
     let mut player_ids = Vec::new();
     if let Some(players) = world.query::<CPlayer>() {
         for (entity, _) in players.iter() {
@@ -42,7 +44,7 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
         for entity in player_ids {
             if let Some(transform) = transforms.get_mut(entity) {
                 transform.pos += velocity;
-                // [AUDIO FIX] Clamp to DYNAMIC bounds
+                // Clamp to the synchronized bounds
                 transform.pos = transform.pos.clamp(Vec2::ZERO, map_size);
             }
         }
