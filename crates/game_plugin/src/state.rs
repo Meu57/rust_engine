@@ -44,33 +44,48 @@ impl MyGame {
     }
 }
 
+// [DEBUG UPGRADE] Robust Scene Setup
+// This creates the entities ONLY if they are missing.
 pub fn setup_scene(world: &mut World) {
-    // 1. Spawn World Settings (The Source of Truth)
-    let settings_entity = world.spawn();
-    world.add_component(settings_entity, CWorldBounds {
-        width: 2000.0,
-        height: 2000.0,
-    });
+    // 1. Check for World Bounds (The Source of Truth)
+    let has_bounds = world.query::<CWorldBounds>().map(|q| q.iter().count() > 0).unwrap_or(false);
+    
+    if !has_bounds {
+        println!("[DEBUG] Spawning CWorldBounds (2000x2000)");
+        let settings_entity = world.spawn();
+        world.add_component(settings_entity, CWorldBounds {
+            width: 2000.0,
+            height: 2000.0,
+        });
+    }
 
-    // 2. Spawn Player
-    let player = world.spawn();
-    world.add_component(
-        player,
-        CTransform {
-            pos: Vec2::new(400.0, 300.0), 
-            ..Default::default()
-        },
-    );
-    world.add_component(player, CPlayer);
-    world.add_component(player, CSprite::default());
+    // 2. Check for Player
+    let has_player = world.query::<CPlayer>().map(|q| q.iter().count() > 0).unwrap_or(false);
+    if !has_player {
+        println!("[DEBUG] Spawning Player");
+        let player = world.spawn();
+        world.add_component(
+            player,
+            CTransform {
+                pos: Vec2::new(400.0, 300.0), 
+                ..Default::default()
+            },
+        );
+        world.add_component(player, CPlayer);
+        world.add_component(player, CSprite::default());
+    }
 
-    // 3. Spawn Camera
-    let camera = world.spawn();
-    world.add_component(camera, CTransform::default());
-    world.add_component(camera, CCamera {
-        zoom: 1.0,
-        smoothness: 25.0, // Increased for snappier "game-like" feel
-    });
+    // 3. Check for Camera
+    let has_camera = world.query::<CCamera>().map(|q| q.iter().count() > 0).unwrap_or(false);
+    if !has_camera {
+        println!("[DEBUG] Spawning Camera");
+        let camera = world.spawn();
+        world.add_component(camera, CTransform::default());
+        world.add_component(camera, CCamera {
+            zoom: 1.0,
+            smoothness: 25.0, 
+        });
+    }
 }
 
 #[cfg(test)]

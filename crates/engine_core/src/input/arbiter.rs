@@ -150,10 +150,9 @@ impl Arbiter {
     fn resolve_movement(&self, global_permission: u64) -> Vec2 {
         use engine_shared::input_types::canonical_actions::*;
 
-        // [AUDIO FIX] Zero Tolerance Suppression
-        // If the mask says "Stop", we return Zero immediately.
-        // This prevents 0.05 analog drift from leaking into the game logic.
+        // [DEBUG] Check if input is being hard-locked by the arbiter
         if (global_permission & channels::MASK_MOVE) == 0 {
+            // println!("[DEBUG] Input Suppressed by Arbiter Mask!");
             return Vec2::ZERO;
         }
 
