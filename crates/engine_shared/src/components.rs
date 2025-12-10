@@ -34,3 +34,21 @@ pub struct CPlayer;
 pub struct CEnemy {
     pub speed: f32,
 }
+
+// --- NEW COMPONENT ---
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CCamera {
+    pub zoom: f32,
+    /// Higher value = snappier. Lower value = heavier/cinematic.
+    pub smoothness: f32, 
+}
+
+impl Default for CCamera {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            smoothness: 5.0,
+        }
+    }
+}

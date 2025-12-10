@@ -1,11 +1,9 @@
 // crates/engine_core/src/renderer/sprite_pass.rs
 
 use std::num::NonZeroU64;
-
 use wgpu::util::{DeviceExt, StagingBelt};
-
 use engine_ecs::World;
-use engine_shared::{CTransform, CSprite};
+use engine_shared::{CTransform, CSprite, CCamera}; // Added CCamera
 use glam::{Mat4, Vec3};
 
 use super::context::GraphicsContext;
@@ -96,13 +94,11 @@ impl SpritePass {
                     multiview: None,
                 });
 
-        // Pop error scope and fail loudly if validation failed.
         let pipeline_error = pollster::block_on(ctx.device.pop_error_scope());
         if let Some(err) = pipeline_error {
             panic!("SpritePass pipeline creation failed validation: {:?}", err);
         }
 
-        // Initial instance buffer (placeholder size, will grow dynamically)
         let instance_data = vec![
             InstanceRaw {
                 model: [[0.0; 4]; 4],
@@ -140,15 +136,42 @@ impl SpritePass {
         let width = ctx.config.width as f32;
         let height = ctx.config.height as f32;
 
-        let projection = Mat4::orthographic_rh(0.0, width, 0.0, height, -1.0, 1.0);
+        // --- NEW CAMERA LOGIC ---
+        let mut view_pos = Vec3::ZERO;
+        let mut zoom = 1.0;
+
+        // Query for active camera
+        if let (Some(cameras), Some(transforms)) = (world.query::<CCamera>(), world.query::<CTransform>()) {
+            for (entity, cam_data) in cameras.iter() {
+                if let Some(transform) = transforms.get(*entity) {
+                    view_pos = Vec3::new(transform.pos.x, transform.pos.y, 0.0);
+                    zoom = cam_data.zoom;
+                    break;
+                }
+            }
+        }
+
+        // Projection (Zoom)
+        let half_w = (width / 2.0) / zoom;
+        let half_h = (height / 2.0) / zoom;
+
+        let projection = Mat4::orthographic_rh(
+            -half_w, half_w, 
+            -half_h, half_h, 
+            -100.0, 100.0
+        );
+
+        // View (Position)
+        let view_matrix = Mat4::from_translation(-view_pos);
+
         let camera_data = CameraUniform {
-            view_proj: projection.to_cols_array_2d(),
+            view_proj: (projection * view_matrix).to_cols_array_2d(),
         };
+        // ------------------------
 
         ctx.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_data]));
 
-        // Build instance list from ECS
         let mut instances = Vec::new();
         if let (Some(transforms), Some(sprites)) =
             (world.query::<CTransform>(), world.query::<CSprite>())
@@ -172,7 +195,6 @@ impl SpritePass {
         let instance_bytes = bytemuck::cast_slice(&instances);
         let required_size = instance_bytes.len() as wgpu::BufferAddress;
 
-        // Grow instance buffer if needed
         if required_size > self.instance_buffer.size() {
             let old_size = self.instance_buffer.size().max(256);
             self.instance_buffer.destroy();
@@ -188,7 +210,6 @@ impl SpritePass {
             });
         }
 
-        // Upload instance data via staging belt
         if required_size > 0 {
             let non_zero = NonZeroU64::new(required_size).unwrap();
             let mut buffer_view = self.staging_belt.write_buffer(
@@ -201,7 +222,6 @@ impl SpritePass {
             buffer_view.copy_from_slice(instance_bytes);
         }
 
-        // Mark staging buffers ready to be submitted
         self.staging_belt.finish();
 
         {
@@ -236,14 +256,10 @@ impl SpritePass {
     }
 
     pub fn cleanup(&mut self) {
-        // Safe to recall after queue submission (Renderer does this after run()).
         self.staging_belt.recall();
     }
 }
 
-// -----------------------------------------------------------------------------
-// RenderPassNode implementation for SpritePass
-// -----------------------------------------------------------------------------
 impl RenderPassNode for SpritePass {
     fn kind(&self) -> PassKind {
         PassKind::Sprite
@@ -259,10 +275,7 @@ impl RenderPassNode for SpritePass {
         _pass_index: usize,
     ) {
         encoder.push_debug_group(pass_desc.name);
-
-        // Render into the off-screen scene color view, as before.
         self.draw(ctx, encoder, resources.scene_color_view, inputs.world);
-
         encoder.pop_debug_group();
     }
 }

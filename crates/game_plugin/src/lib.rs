@@ -107,6 +107,9 @@ extern "C" fn shim_on_update(
             let input = &*input;
 
             systems::player::update_player(world, input, dt, &game.actions);
+            
+            // --- NEW: Update Camera ---
+            systems::camera::update_camera(world, dt);
 
             if let Some(spawn_fn) = game.spawn_fn {
                 let ctx_ptr = world as *mut World as *mut HostContext;
@@ -117,6 +120,9 @@ extern "C" fn shim_on_update(
         FFIResult::Success
     })
 }
+
+// (The rest of this file (shim_on_unload, shim_save_state, etc.) is unchanged. 
+// You can keep the existing code below this point.)
 
 extern "C" fn shim_on_unload(_state: *mut c_void, _ctx: *mut HostContext) -> FFIResult {
     FFIResult::Success
@@ -270,10 +276,6 @@ pub extern "C" fn _create_game() -> PluginApi {
     }
 }
 
-// ---------------------------------------------------------------------
-// SAFETY TESTS
-// ---------------------------------------------------------------------
-
 #[cfg(test)]
 mod safety_tests {
     use super::*;
@@ -281,39 +283,29 @@ mod safety_tests {
 
     #[test]
     fn test_layout_change_requires_version_ack() {
-        // 1. Measure the serialized size of the default state
         let game = MyGame::default();
         let current_size =
             bincode::serialized_size(&game).expect("Serialization of MyGame must succeed");
 
-        // 2. Tripwires: these constants must be updated whenever you
-        // intentionally change MyGame's layout or the version/hash constants.
-        const EXPECTED_SIZE: u64 = 8; // f32 (4) + u32 (4); skipped fields don't serialize
+        const EXPECTED_SIZE: u64 = 8;
         const EXPECTED_VERSION: u32 = 1;
         const EXPECTED_HASH: u64 = 0x0123_4567_89AB_CDEF;
 
-        // Check 1: Struct layout / serialized shape
         assert_eq!(
             current_size, EXPECTED_SIZE,
-            "STRUCT LAYOUT CHANGED! \
-             MyGame serialized size changed from {} to {}. \
-             Action required: bump CURRENT_STATE_VERSION and update EXPECTED_SIZE/EXPECTED_VERSION.",
+            "STRUCT LAYOUT CHANGED! MyGame serialized size changed from {} to {}. Action required: bump CURRENT_STATE_VERSION and update EXPECTED_SIZE/EXPECTED_VERSION.",
             EXPECTED_SIZE, current_size
         );
 
-        // Check 2: Version discipline
         assert_eq!(
             CURRENT_STATE_VERSION, EXPECTED_VERSION,
-            "VERSION MISMATCH! CURRENT_STATE_VERSION is {}, but EXPECTED_VERSION is {}. \
-             Update EXPECTED_VERSION when you intentionally bump the state version.",
+            "VERSION MISMATCH! CURRENT_STATE_VERSION is {}, but EXPECTED_VERSION is {}. Update EXPECTED_VERSION when you intentionally bump the state version.",
             CURRENT_STATE_VERSION, EXPECTED_VERSION
         );
 
-        // Check 3: Schema hash discipline
         assert_eq!(
             CURRENT_SCHEMA_HASH, EXPECTED_HASH,
-            "HASH MISMATCH! CURRENT_SCHEMA_HASH is 0x{:X}, but EXPECTED_HASH is 0x{:X}. \
-             Update EXPECTED_HASH when you intentionally change the schema hash.",
+            "HASH MISMATCH! CURRENT_SCHEMA_HASH is 0x{:X}, but EXPECTED_HASH is 0x{:X}. Update EXPECTED_HASH when you intentionally change the schema hash.",
             CURRENT_SCHEMA_HASH, EXPECTED_HASH
         );
     }
