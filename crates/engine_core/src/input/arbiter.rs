@@ -150,9 +150,11 @@ impl Arbiter {
     fn resolve_movement(&self, global_permission: u64) -> Vec2 {
         use engine_shared::input_types::canonical_actions::*;
 
-        // [DEBUG] Check if input is being hard-locked by the arbiter
+        // [DEBUG LOGGING ACTIVE] 
+        // Zero Tolerance Suppression
         if (global_permission & channels::MASK_MOVE) == 0 {
-            // println!("[DEBUG] Input Suppressed by Arbiter Mask!");
+            // IF THIS PRINTS, YOUR INPUT IS LOCKED BY THE ARBITER
+            println!("[DEBUG] Input Suppressed by Arbiter Mask!");
             return Vec2::ZERO;
         }
 

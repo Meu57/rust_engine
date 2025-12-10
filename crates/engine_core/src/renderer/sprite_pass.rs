@@ -11,7 +11,7 @@ use super::resources::RenderResources;
 use super::types::{CameraUniform, InstanceRaw};
 use super::frame_graph::{FrameInputs, PassDesc, PassKind, PhysicalResources, RenderPassNode};
 
-// 100k sprites buffer
+// 100k sprites buffer (Audio Fix for Stutter)
 const MAX_SPRITES: usize = 100_000;
 
 pub struct SpritePass {
@@ -24,11 +24,6 @@ pub struct SpritePass {
 
 impl SpritePass {
     pub fn new(ctx: &GraphicsContext, resources: &RenderResources) -> Self {
-        // ... (Keep existing init code unchanged) ...
-        // Ensure you copy the 'new' method from the previous successful version
-        // or just update the 'draw' method below if your 'new' is already correct.
-        
-        // (For brevity, assuming 'new' is correct from previous turn)
         let camera_uniform = CameraUniform::default();
         let camera_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -42,14 +37,15 @@ impl SpritePass {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() }],
         });
 
-        // Shader compiling...
         ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = ctx.device.create_shader_module(wgpu::include_wgsl!("../../../../assets/shaders/sprite.wgsl"));
+        
         let render_pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sprite Pipeline Layout"),
             bind_group_layouts: &[&resources.camera_layout],
             push_constant_ranges: &[],
         });
+
         let render_pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sprite Render Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -76,7 +72,7 @@ impl SpritePass {
         });
         let _ = pollster::block_on(ctx.device.pop_error_scope());
 
-        // Persistent buffer
+        // [AUDIO FIX] Persistent Buffer (Stops Reallocation Stutter)
         let instance_buffer_size = (MAX_SPRITES * std::mem::size_of::<InstanceRaw>()) as wgpu::BufferAddress;
         let instance_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer (Persistent)"),
@@ -97,13 +93,15 @@ impl SpritePass {
         view: &wgpu::TextureView,
         world: &World,
     ) {
-        // [FIX] RECALL MEMORY
-        // We must tell the belt to reclaim used chunks from the previous frame.
-        // Without this, the belt keeps growing, causing the "Sticky Fluid" lag.
+        // [AUDIO FIX] Recycle memory (Stops "Sticky Fluid" memory leak)
         self.staging_belt.recall();
 
-        let width = ctx.config.width as f32;
-        let height = ctx.config.height as f32;
+        // [VISUAL FIX] FORCE LOGICAL RESOLUTION
+        // We ignore the physical window size (ctx.config.width) and force 
+        // the camera projection to match the Game Logic (1280x720).
+        // This ensures the "Invisible Wall" matches the edge of the screen exactly.
+        let width = 1280.0;
+        let height = 720.0;
 
         // --- CAMERA UPDATE ---
         let mut view_pos = Vec3::ZERO;
@@ -152,7 +150,6 @@ impl SpritePass {
         let instance_bytes = bytemuck::cast_slice(&instances);
         let current_data_size = instance_bytes.len() as wgpu::BufferAddress;
 
-        // Write directly to belt
         if current_data_size > 0 {
             let mut buffer_view = self.staging_belt.write_buffer(
                 encoder,
@@ -194,7 +191,6 @@ impl SpritePass {
     }
 }
 
-// (RenderPassNode impl stays the same)
 impl RenderPassNode for SpritePass {
     fn kind(&self) -> PassKind { PassKind::Sprite }
     fn execute<'a>(&mut self, ctx: &'a GraphicsContext, encoder: &mut wgpu::CommandEncoder, resources: &PhysicalResources<'a>, inputs: &FrameInputs<'a>, pass_desc: &PassDesc, _pass_index: usize) {

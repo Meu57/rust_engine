@@ -7,24 +7,17 @@ use glam::Vec2;
 pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[ActionId; 4]) {
     let [up, down, left, right] = *actions;
 
-    // 1. Fetch Map Bounds & Debug
-    let mut map_size = Vec2::new(1280.0, 720.0); // Default Fallback
-    let mut bounds_found = false;
-
+    // 1. Fetch Map Bounds
+    let mut map_size = Vec2::new(2000.0, 2000.0); 
+    
     if let Some(bounds) = world.query::<CWorldBounds>() {
         for (_, b) in bounds.iter() {
             map_size = Vec2::new(b.width, b.height);
-            bounds_found = true;
             break; 
         }
     }
 
-    if !bounds_found {
-        // This log will spam if bounds are missing, alerting you immediately
-        // println!("[WARN] No CWorldBounds found! Using default 1280x720");
-    }
-
-    // 2. Calculate Velocity
+    // 2. Calculate Movement
     let mut direction = Vec2::ZERO;
     if input.is_active(up) { direction.y += 1.0; }
     if input.is_active(down) { direction.y -= 1.0; }
@@ -38,7 +31,7 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
         Vec2::ZERO
     };
 
-    // 3. Apply & Clamp with Debug Logging
+    // 3. Apply & Clamp
     let mut player_ids = Vec::new();
     if let Some(players) = world.query::<CPlayer>() {
         for (entity, _) in players.iter() {
@@ -55,11 +48,11 @@ pub fn update_player(world: &mut World, input: &InputState, dt: f32, actions: &[
                 // Clamp
                 transform.pos = transform.pos.clamp(Vec2::ZERO, map_size);
 
-                // [DEBUG] Check if we hit a wall
+                // [DEBUG LOGGING ACTIVE]
                 if transform.pos != old_pos + velocity {
-                    // Only log if we are actually trying to move but got stopped
                     if velocity.length_squared() > 0.0 {
-                         // println!("[DEBUG] HIT WALL! Pos: {} | Limit: {}", transform.pos, map_size);
+                         // WE WANT TO SEE THIS IF IT HAPPENS
+                         println!("[DEBUG] HIT WALL! Pos: {} | Limit: {}", transform.pos, map_size);
                     }
                 }
             }
