@@ -3,13 +3,17 @@
 use std::num::NonZeroU64;
 use wgpu::util::{DeviceExt, StagingBelt};
 use engine_ecs::World;
-use engine_shared::{CTransform, CSprite, CCamera}; // Added CCamera
+use engine_shared::{CTransform, CSprite, CCamera};
 use glam::{Mat4, Vec3};
 
 use super::context::GraphicsContext;
 use super::resources::RenderResources;
 use super::types::{CameraUniform, InstanceRaw};
 use super::frame_graph::{FrameInputs, PassDesc, PassKind, PhysicalResources, RenderPassNode};
+
+// [AUDIO FIX] Pre-allocate a large buffer to prevent "Sticky Fluid" re-allocation lag.
+// 100,000 sprites * 80 bytes = ~8 MB VRAM. Safe for almost any 2D scenario.
+const MAX_SPRITES: usize = 100_000;
 
 pub struct SpritePass {
     render_pipeline: wgpu::RenderPipeline,
@@ -31,7 +35,6 @@ impl SpritePass {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
 
-        // Camera bind group uses the shared layout from RenderResources
         let camera_bind_group =
             ctx.device
                 .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -43,9 +46,6 @@ impl SpritePass {
                     }],
                 });
 
-        // ---------------------------------------------------------------------
-        // Shader + pipeline creation with validation error scope
-        // ---------------------------------------------------------------------
         ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let shader = ctx
@@ -58,7 +58,6 @@ impl SpritePass {
             ctx.device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Sprite Pipeline Layout"),
-                    // Use shared camera layout
                     bind_group_layouts: &[&resources.camera_layout],
                     push_constant_ranges: &[],
                 });
@@ -99,21 +98,17 @@ impl SpritePass {
             panic!("SpritePass pipeline creation failed validation: {:?}", err);
         }
 
-        let instance_data = vec![
-            InstanceRaw {
-                model: [[0.0; 4]; 4],
-                color: [0.0; 4],
-            };
-            100
-        ];
-
-        let instance_buffer =
-            ctx.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Instance Buffer"),
-                    contents: bytemuck::cast_slice(&instance_data),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                });
+        // [AUDIO FIX] Create one massive buffer at startup.
+        // We will never destroy/recreate this during the game.
+        let instance_buffer_size = 
+            (MAX_SPRITES * std::mem::size_of::<InstanceRaw>()) as wgpu::BufferAddress;
+            
+        let instance_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Buffer (Fixed Size)"),
+            size: instance_buffer_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let staging_belt = StagingBelt::new(1024);
 
@@ -136,11 +131,10 @@ impl SpritePass {
         let width = ctx.config.width as f32;
         let height = ctx.config.height as f32;
 
-        // --- NEW CAMERA LOGIC ---
+        // --- CAMERA UPDATE ---
         let mut view_pos = Vec3::ZERO;
         let mut zoom = 1.0;
 
-        // Query for active camera
         if let (Some(cameras), Some(transforms)) = (world.query::<CCamera>(), world.query::<CTransform>()) {
             for (entity, cam_data) in cameras.iter() {
                 if let Some(transform) = transforms.get(*entity) {
@@ -151,7 +145,6 @@ impl SpritePass {
             }
         }
 
-        // Projection (Zoom)
         let half_w = (width / 2.0) / zoom;
         let half_h = (height / 2.0) / zoom;
 
@@ -161,23 +154,28 @@ impl SpritePass {
             -100.0, 100.0
         );
 
-        // View (Position)
         let view_matrix = Mat4::from_translation(-view_pos);
 
         let camera_data = CameraUniform {
             view_proj: (projection * view_matrix).to_cols_array_2d(),
         };
-        // ------------------------
 
         ctx.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_data]));
 
+        // --- INSTANCE COLLECTION ---
         let mut instances = Vec::new();
         if let (Some(transforms), Some(sprites)) =
             (world.query::<CTransform>(), world.query::<CSprite>())
         {
             for (entity, transform) in transforms.iter() {
                 if let Some(sprite) = sprites.get(*entity) {
+                    // Safety check: Don't overflow our fixed buffer
+                    if instances.len() >= MAX_SPRITES {
+                        eprintln!("WARNING: Exceeded MAX_SPRITES ({}), culling remaining objects.", MAX_SPRITES);
+                        break;
+                    }
+
                     let model = Mat4::from_scale_rotation_translation(
                         Vec3::new(transform.scale.x * 50.0, transform.scale.y * 50.0, 1.0),
                         glam::Quat::from_rotation_z(transform.rotation),
@@ -193,30 +191,15 @@ impl SpritePass {
         }
 
         let instance_bytes = bytemuck::cast_slice(&instances);
-        let required_size = instance_bytes.len() as wgpu::BufferAddress;
+        let current_data_size = instance_bytes.len() as wgpu::BufferAddress;
 
-        if required_size > self.instance_buffer.size() {
-            let old_size = self.instance_buffer.size().max(256);
-            self.instance_buffer.destroy();
-
-            let mut new_size = (required_size * 2).max(old_size);
-            new_size = wgpu::util::align_to(new_size, 4);
-
-            self.instance_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Instance Buffer"),
-                size: new_size,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-
-        if required_size > 0 {
-            let non_zero = NonZeroU64::new(required_size).unwrap();
+        // [AUDIO FIX] Write directly to the belt. NO reallocation.
+        if current_data_size > 0 {
             let mut buffer_view = self.staging_belt.write_buffer(
                 encoder,
                 &self.instance_buffer,
                 0,
-                non_zero,
+                NonZeroU64::new(current_data_size).unwrap(),
                 &ctx.device,
             );
             buffer_view.copy_from_slice(instance_bytes);
@@ -248,9 +231,8 @@ impl SpritePass {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            let slice_size =
-                (instances.len() * std::mem::size_of::<InstanceRaw>()) as wgpu::BufferAddress;
-            render_pass.set_vertex_buffer(0, self.instance_buffer.slice(0..slice_size));
+            // Only draw the number of instances we actually have
+            render_pass.set_vertex_buffer(0, self.instance_buffer.slice(0..current_data_size));
             render_pass.draw(0..4, 0..instances.len() as u32);
         }
     }

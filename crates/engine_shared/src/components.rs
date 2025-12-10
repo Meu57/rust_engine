@@ -35,12 +35,10 @@ pub struct CEnemy {
     pub speed: f32,
 }
 
-// --- NEW COMPONENT ---
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CCamera {
     pub zoom: f32,
-    /// Higher value = snappier. Lower value = heavier/cinematic.
     pub smoothness: f32, 
 }
 
@@ -50,5 +48,20 @@ impl Default for CCamera {
             zoom: 1.0,
             smoothness: 5.0,
         }
+    }
+}
+
+// [AUDIO FIX] "Single Source of Truth" Component
+// This solves the "Invisible Prison" by ensuring Player & Camera share exact bounds.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CWorldBounds {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for CWorldBounds {
+    fn default() -> Self {
+        Self { width: 2000.0, height: 2000.0 }
     }
 }

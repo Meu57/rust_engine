@@ -11,8 +11,6 @@ use engine_shared::input_types::{
 
 pub mod channels {
     use engine_shared::input_types::canonical_actions::*;
-
-    // Mask for all movement bits based on shared Action IDs
     pub const MASK_MOVE: u64 =
         (1 << MOVE_UP) | (1 << MOVE_DOWN) | (1 << MOVE_LEFT) | (1 << MOVE_RIGHT);
     pub const MASK_ALL: u64 = !0;
@@ -94,14 +92,12 @@ impl Arbiter {
     pub fn resolve(&mut self) -> InputState {
         let mut state = InputState::default();
 
-        // FIRST PASS: compute activity per layer using only immutable borrows.
         let layer_activities: Vec<bool> = self
             .layer_configs
             .iter()
             .map(|cfg| self.layer_has_activity(cfg.layer))
             .collect();
 
-        // SECOND PASS: mutate layer_state + compute global_permission.
         let mut global_permission: u64 = channels::MASK_ALL;
 
         for (idx, config) in self.layer_configs.iter().enumerate() {
@@ -125,12 +121,10 @@ impl Arbiter {
             global_permission &= layer_mask;
         }
 
-        // Resolve analog
         let final_vector = self.resolve_movement(global_permission);
         state.analog_axes[0] = final_vector.x;
         state.analog_axes[1] = final_vector.y;
 
-        // Resolve digital
         let mut digital_requests: u64 = 0;
         for sig in &self.action_signals {
             let bit_index = sig.action_id as u32;
@@ -156,7 +150,9 @@ impl Arbiter {
     fn resolve_movement(&self, global_permission: u64) -> Vec2 {
         use engine_shared::input_types::canonical_actions::*;
 
-        // Broad-phase veto: if ALL movement bits are suppressed, skip work.
+        // [AUDIO FIX] Zero Tolerance Suppression
+        // If the mask says "Stop", we return Zero immediately.
+        // This prevents 0.05 analog drift from leaking into the game logic.
         if (global_permission & channels::MASK_MOVE) == 0 {
             return Vec2::ZERO;
         }
@@ -165,7 +161,6 @@ impl Arbiter {
             return Vec2::ZERO;
         }
 
-        // Winner-takes-all by highest-priority layer that has movement.
         let mut winning_layer: Option<PriorityLayer> = None;
         for cfg in &self.layer_configs {
             if self
@@ -189,7 +184,6 @@ impl Arbiter {
 
         let mut final_vec = raw;
 
-        // Clamp axis components if specific direction bits are suppressed
         if (global_permission & (1 << MOVE_RIGHT)) == 0 && final_vec.x > 0.0 {
             final_vec.x = 0.0;
         }
@@ -203,7 +197,6 @@ impl Arbiter {
             final_vec.y = 0.0;
         }
 
-        // Deadzone after suppression
         if final_vec.x.abs() < self.deadzone {
             final_vec.x = 0.0;
         }

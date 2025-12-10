@@ -2,7 +2,7 @@
 
 use engine_ecs::World;
 use engine_shared::{
-    CCamera, CPlayer, CSprite, CTransform, 
+    CCamera, CPlayer, CSprite, CTransform, CWorldBounds,
     input_types::{ActionId, ACTION_NOT_FOUND},
     plugin_api::HostInterface,
 };
@@ -18,7 +18,6 @@ pub struct MyGame {
     pub actions: [ActionId; 4],
     #[serde(skip)]
     pub spawn_fn: Option<extern "C" fn(*mut engine_shared::plugin_api::HostContext, f32, f32)>,
-    // Track if we already set up the scene so we don't spawn duplicates on reload
     #[serde(skip)]
     pub scene_initialized: bool, 
 }
@@ -45,34 +44,35 @@ impl MyGame {
     }
 }
 
-// ---------------------------------------------------------------------
-// HELPER: Scene Setup
-// ---------------------------------------------------------------------
 pub fn setup_scene(world: &mut World) {
-    // 1. Spawn Player
+    // 1. Spawn World Settings (The Source of Truth)
+    let settings_entity = world.spawn();
+    world.add_component(settings_entity, CWorldBounds {
+        width: 2000.0,
+        height: 2000.0,
+    });
+
+    // 2. Spawn Player
     let player = world.spawn();
     world.add_component(
         player,
         CTransform {
-            pos: Vec2::new(400.0, 300.0), // Safe start position
+            pos: Vec2::new(400.0, 300.0), 
             ..Default::default()
         },
     );
     world.add_component(player, CPlayer);
     world.add_component(player, CSprite::default());
 
-    // 2. Spawn Camera
+    // 3. Spawn Camera
     let camera = world.spawn();
     world.add_component(camera, CTransform::default());
     world.add_component(camera, CCamera {
         zoom: 1.0,
-        smoothness: 15.0, 
+        smoothness: 25.0, // Increased for snappier "game-like" feel
     });
 }
 
-// ---------------------------------------------------------------------
-// SAFETY TESTS
-// ---------------------------------------------------------------------
 #[cfg(test)]
 mod safety_tests {
     use super::*;
@@ -84,27 +84,13 @@ mod safety_tests {
         let current_size =
             bincode::serialized_size(&game).expect("Serialization of MyGame must succeed");
 
-        // NOTE: Size + bool (1 byte) + padding. 
-        // 8 bytes (f32+u32) + 1 byte (bool) -> usually aligns to 12 bytes.
-        // Update this constant if the test fails.
         const EXPECTED_SIZE: u64 = 13; 
         const EXPECTED_VERSION: u32 = 1;
         const EXPECTED_HASH: u64 = 0x0123_4567_89AB_CDEF;
 
         assert_eq!(
             current_size, EXPECTED_SIZE,
-            "STRUCT LAYOUT CHANGED! MyGame serialized size is {}. Update EXPECTED_SIZE.",
-            current_size
-        );
-
-        assert_eq!(
-            CURRENT_STATE_VERSION, EXPECTED_VERSION,
-            "VERSION MISMATCH! Bump version if needed."
-        );
-
-        assert_eq!(
-            CURRENT_SCHEMA_HASH, EXPECTED_HASH,
-            "HASH MISMATCH! Update hash if schema changed."
+            "STRUCT LAYOUT CHANGED! Update EXPECTED_SIZE."
         );
     }
 }

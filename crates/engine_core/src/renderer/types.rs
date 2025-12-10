@@ -15,7 +15,6 @@ impl InstanceRaw {
             array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
-                // model matrix (4 columns)
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
@@ -36,7 +35,6 @@ impl InstanceRaw {
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
-                // color
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
                     shader_location: 4,
@@ -47,8 +45,9 @@ impl InstanceRaw {
     }
 }
 
-// Camera uniform blob
-#[repr(C)]
+// [FIX] UB (Uniform Buffer) DEFINITION
+// We explicitely align this struct to prevent 'sticky' memory issues on strict drivers.
+#[repr(C, align(16))] 
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
