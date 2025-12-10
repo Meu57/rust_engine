@@ -1,3 +1,4 @@
+//crates\game_plugin\src\systems\enemy.rs
 //! Enemy spawning for the plugin.
 //! The plugin does *not* mutate the host World directly.
 //! Instead it calls the host-provided `spawn_fn(ctx, x, y)` to request spawns.

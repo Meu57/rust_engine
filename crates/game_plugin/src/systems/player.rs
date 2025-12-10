@@ -1,3 +1,5 @@
+//crates\game_plugin\src\systems\player.rs
+
 use engine_ecs::World;
 use engine_shared::{InputState, CPlayer, CTransform, ActionId};
 use glam::Vec2;
